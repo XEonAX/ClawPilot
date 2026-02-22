@@ -1,29 +1,30 @@
 # ClawPilot — Implementation Plan
 
-> **Fork of NanoClaw**: .NET 8+ rewrite using **GitHub Copilot SDK** (instead of Claude Agent SDK) and **Telegram** (instead of WhatsApp).
+> **Fork of NanoClaw**: .NET 8+ rewrite using **Semantic Kernel + OpenRouter** (instead of Claude Agent SDK), **Telegram** (instead of WhatsApp), and **SQLite with vector memory** for persistence.
 
 ---
 
 ## Table of Contents
 
 1. [Architecture Overview](#1-architecture-overview)
-2. [Component Mapping](#2-component-mapping)
-3. [Project Structure](#3-project-structure)
-4. [Telegram Channel Layer](#4-telegram-channel-layer)
-5. [Copilot SDK Integration](#5-copilot-sdk-integration)
-6. [Database Layer](#6-database-layer)
-7. [Session & Conversation Management](#7-session--conversation-management)
-8. [Tool System (IPC Replacement)](#8-tool-system-ipc-replacement)
-9. [Hooks & Security](#9-hooks--security)
-10. [Group Chat Support](#10-group-chat-support)
-11. [Configuration System](#11-configuration-system)
-12. [Skills Engine](#12-skills-engine)
-13. [Container Strategy](#13-container-strategy)
-14. [Logging & Observability](#14-logging--observability)
-15. [Testing Strategy](#15-testing-strategy)
-16. [Deployment](#16-deployment)
-17. [Migration Checklist](#17-migration-checklist)
-18. [Open Questions & Risks](#18-open-questions--risks)
+2. [Framework & LLM Provider Evaluation](#2-framework--llm-provider-evaluation)
+3. [Component Mapping](#3-component-mapping)
+4. [Project Structure](#4-project-structure)
+5. [Telegram Channel Layer](#5-telegram-channel-layer)
+6. [LLM Integration (Semantic Kernel + OpenRouter)](#6-llm-integration-semantic-kernel--openrouter)
+7. [Database Layer & Vector Memory](#7-database-layer--vector-memory)
+8. [Session & Conversation Management](#8-session--conversation-management)
+9. [Tool System (IPC Replacement)](#9-tool-system-ipc-replacement)
+10. [Hooks & Security](#10-hooks--security)
+11. [Group Chat Support](#11-group-chat-support)
+12. [Configuration System](#12-configuration-system)
+13. [Skills Engine](#13-skills-engine)
+14. [Container Strategy](#14-container-strategy)
+15. [Logging & Observability](#15-logging--observability)
+16. [Testing Strategy](#16-testing-strategy)
+17. [Deployment](#17-deployment)
+18. [Migration Checklist](#18-migration-checklist)
+19. [Open Questions & Risks](#19-open-questions--risks)
 
 ---
 
@@ -54,30 +55,101 @@ Telegram (Telegram.Bot polling / webhook)
     ↓
 Program.cs  (hosted service, event-driven)
     ↓
-SQLite  (EF Core — message queue + conversation state)
+SQLite  (EF Core — messages + state + vector memory via sqlite-vec)
     ↓
-CopilotSessionManager  (in-process, no containers)
+SemanticKernelAgent  (in-process orchestration, no containers)
     ↓
-CopilotClient / CopilotSession  (GitHub Copilot SDK)
+OpenRouter API  (unified LLM access — Claude, GPT, Gemini, etc.)
     ↓
-Custom Tools (AIFunctionFactory) + MCP servers
+SK Plugins + Custom Tools + MCP servers
     ↓
 response → SQLite → Telegram
 ```
 
-**Key architectural difference**: NanoClaw spawns Docker containers per agent run with Claude SDK inside each. ClawPilot runs **in-process** — the Copilot SDK manages its own `copilot` CLI subprocess via JSON-RPC. This eliminates the container-runner, agent-runner, and file-based IPC layers entirely.
+**Key architectural differences**:
+- NanoClaw spawns Docker containers per agent run with Claude SDK inside each. ClawPilot runs **in-process** using Semantic Kernel for orchestration, eliminating the container-runner, agent-runner, and file-based IPC layers entirely.
+- NanoClaw is locked to Claude models. ClawPilot uses **OpenRouter** as a provider-agnostic gateway, giving access to Claude, GPT-4o, Gemini, Llama, and 200+ other models through a single API.
+- ClawPilot adds **vector memory** (sqlite-vec) for semantic retrieval across conversation history — a capability NanoClaw lacks.
 
 ---
 
-## 2. Component Mapping
+## 2. Framework & LLM Provider Evaluation
+
+The deep research identified four viable approaches for the .NET + Telegram + OpenRouter stack. Here is our evaluation:
+
+### Option A: Full Framework — BotSharp
+
+[BotSharp](https://github.com/SciSharp/BotSharp) is an open-source C#/.NET Core AI bot platform with multi-agent conversation, state management, RAG support, and a built-in Telegram plugin (uses `Telegram.Bot` under the hood).
+
+| Pros | Cons |
+|---|---|
+| Batteries-included: Telegram, RAG, multi-agent | Heavy — brings entire framework with its own conventions |
+| OpenRouter via BotSharp's OpenAI plugin (custom base URL) | Less control over orchestration loop |
+| SK plugin for memory | Learning curve for BotSharp's plugin system |
+| Production-tested | May be overkill for a personal assistant |
+
+**Verdict**: Good for rapid prototyping, but too opinionated. We'd fight the framework for custom behavior.
+
+### Option B: Full Framework — LLM Tornado
+
+[LLM Tornado](https://github.com/lofcz/LLMTornado) is a provider-agnostic .NET SDK with 30+ built-in connectors (including native OpenRouter support) and orchestration primitives.
+
+| Pros | Cons |
+|---|---|
+| Native OpenRouter connector — no adapter needed | Newer project, smaller community |
+| Works with Semantic Kernel and `Microsoft.Extensions.AI` | Less documentation than SK |
+| Local inference support (Ollama, etc.) | Agent loop still needs custom code |
+| Lightweight compared to BotSharp | |
+
+**Verdict**: Strong contender for the LLM client layer. Could be used alongside SK, but adds a dependency where SK alone suffices.
+
+### Option C: Semantic Kernel + OpenRouter (Recommended) ✅
+
+Use [Microsoft Semantic Kernel](https://github.com/microsoft/semantic-kernel) for orchestration with the **OpenAI .NET SDK** pointed at OpenRouter's base URL. SK provides:
+- Chat completion with function calling (tool use)
+- Pluggable memory with SQLite Vector Store connector (`Microsoft.SemanticKernel.Connectors.SqliteVec`)
+- Prompt templates, filters (hooks), and auto function calling
+- First-party Microsoft support, large community, stable API
+
+OpenRouter is accessed by configuring the OpenAI connector with `baseUrl = "https://openrouter.ai/api/v1"` and an OpenRouter API key — no custom SDK needed.
+
+| Pros | Cons |
+|---|---|
+| Most mature .NET AI orchestration library | Slightly more boilerplate than a full framework |
+| OpenRouter works via OpenAI-compatible endpoint | SK's vector store connectors are still "Preview" |
+| Native SQLite vector memory (sqlite-vec) | |
+| Full control over the agent loop | |
+| `Microsoft.Extensions.AI` integration | |
+
+**Verdict**: Best balance of flexibility, maturity, and control. This is our primary stack.
+
+### Option D: Manual Stack (Telegram.Bot + HttpClient + SQLite)
+
+Roll everything by hand: `Telegram.Bot` for messaging, `HttpClient` or `OpenRouter.NET` for LLM calls, raw SQLite for state.
+
+| Pros | Cons |
+|---|---|
+| Maximum control, minimal dependencies | Must implement context management, tool calling, prompt building |
+| Lightest possible footprint | No built-in function calling or memory |
+| Easy to understand | Significant engineering effort for agent capabilities |
+
+**Verdict**: Too low-level. We'd end up reimplementing what SK already provides.
+
+### Decision
+
+**Primary stack: Semantic Kernel + OpenRouter** (Option C), with `Telegram.Bot` for messaging and EF Core + sqlite-vec for persistence.
+
+---
+
+## 3. Component Mapping
 
 | NanoClaw Component | File(s) | ClawPilot Equivalent | Technology |
 |---|---|---|---|
 | WhatsApp channel | `channels/whatsapp.ts` | Telegram channel | `Telegram.Bot` NuGet |
-| Claude Agent SDK | `container/agent-runner/` | Copilot SDK | `GitHub.Copilot.SDK` NuGet |
-| Docker containers | `container-runner.ts`, `container-runtime.ts` | **Eliminated** — in-process | CopilotClient manages CLI |
-| File-based IPC | `ipc.ts`, `ipc-mcp-stdio.ts` | **Eliminated** — native tools | AIFunctionFactory + MCP |
-| SQLite (better-sqlite3) | `db.ts` | SQLite (EF Core) | `Microsoft.EntityFrameworkCore.Sqlite` |
+| Claude Agent SDK | `container/agent-runner/` | SK + OpenRouter orchestration | `Microsoft.SemanticKernel` + OpenAI SDK |
+| Docker containers | `container-runner.ts`, `container-runtime.ts` | **Eliminated** — in-process | SK Kernel manages LLM calls |
+| File-based IPC | `ipc.ts`, `ipc-mcp-stdio.ts` | **Eliminated** — native SK plugins | SK KernelFunction + MCP |
+| SQLite (better-sqlite3) | `db.ts` | SQLite (EF Core) + vector memory | `EF Core SQLite` + `sqlite-vec` |
 | Polling loop | `index.ts` (2s setInterval) | Hosted service + event-driven | `IHostedService` |
 | Config (.env) | `config.ts`, `env.ts` | appsettings.json + env | `IConfiguration` |
 | Group queue | `group-queue.ts` | Channel-based queue | `System.Threading.Channels` |
@@ -88,10 +160,11 @@ response → SQLite → Telegram
 | Task scheduler | `task-scheduler.ts` | Quartz.NET or Timer-based | `Quartz` NuGet |
 | Auth (QR pairing) | `whatsapp-auth.ts` | Bot token (no auth flow) | Single env var |
 | launchd plist | `launchd/` | systemd unit or launchd | Platform-specific |
+| — (no equivalent) | — | Vector memory / RAG | `SK.Connectors.SqliteVec` + `sqlite-vec` |
 
 ---
 
-## 3. Project Structure
+## 4. Project Structure
 
 ```
 ClawPilot/
@@ -111,6 +184,7 @@ ClawPilot/
 │       │   ├── Entities/
 │       │   │   ├── Conversation.cs
 │       │   │   ├── Message.cs
+│       │   │   ├── MemoryRecord.cs     # Vector memory entity
 │       │   │   └── ScheduledTask.cs
 │       │   └── Migrations/
 │       │
@@ -118,10 +192,16 @@ ClawPilot/
 │       │   ├── ITelegramChannel.cs     # Interface
 │       │   └── TelegramChannel.cs      # Telegram.Bot integration
 │       │
-│       ├── Copilot/
-│       │   ├── CopilotSessionManager.cs  # Session lifecycle
-│       │   ├── ToolRegistry.cs           # Custom tool definitions
-│       │   └── HookHandlers.cs           # PreToolUse, PostToolUse, etc.
+│       ├── AI/
+│       │   ├── AgentOrchestrator.cs      # SK Kernel setup & agent loop
+│       │   ├── OpenRouterConfig.cs       # OpenRouter provider config
+│       │   ├── MemoryService.cs          # sqlite-vec vector memory
+│       │   ├── Plugins/
+│       │   │   ├── MessagingPlugin.cs    # send_message, search_messages
+│       │   │   ├── SchedulerPlugin.cs    # schedule_task, list_tasks
+│       │   │   └── UtilityPlugin.cs      # get_datetime, etc.
+│       │   └── Filters/
+│       │       └── SecurityFilter.cs     # Pre/post function call filtering
 │       │
 │       ├── Services/
 │       │   ├── MessageProcessorService.cs  # Background worker
@@ -135,12 +215,13 @@ ClawPilot/
 │   └── ClawPilot.Tests/
 │       ├── ClawPilot.Tests.csproj
 │       ├── DatabaseTests.cs
-│       ├── CopilotSessionManagerTests.cs
+│       ├── AgentOrchestratorTests.cs
 │       ├── TelegramChannelTests.cs
 │       └── GroupQueueTests.cs
 │
 └── docs/
     ├── research.md
+    ├── deep-research-report.md
     └── plan.md
 ```
 
@@ -159,8 +240,14 @@ ClawPilot/
     <!-- Telegram -->
     <PackageReference Include="Telegram.Bot" Version="22.*" />
 
-    <!-- Copilot SDK -->
-    <PackageReference Include="GitHub.Copilot.SDK" Version="*" />
+    <!-- Semantic Kernel (orchestration + function calling) -->
+    <PackageReference Include="Microsoft.SemanticKernel" Version="1.*" />
+
+    <!-- OpenRouter via OpenAI-compatible connector -->
+    <PackageReference Include="Microsoft.SemanticKernel.Connectors.OpenAI" Version="1.*" />
+
+    <!-- Vector memory (sqlite-vec for semantic search) -->
+    <PackageReference Include="Microsoft.SemanticKernel.Connectors.SqliteVec" Version="1.*-preview" />
 
     <!-- Database -->
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.*" />
@@ -173,6 +260,10 @@ ClawPilot/
 
     <!-- Configuration -->
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.*" />
+
+    <!-- Optional: OpenRouter.NET for advanced OpenRouter features -->
+    <!-- <PackageReference Include="OpenRouter.NET" Version="*" /> -->
+
   </ItemGroup>
 
 </Project>
@@ -180,7 +271,7 @@ ClawPilot/
 
 ---
 
-## 4. Telegram Channel Layer
+## 5. Telegram Channel Layer
 
 NanoClaw's WhatsApp layer (`channels/whatsapp.ts`) uses Baileys with a complex QR-code pairing flow, phone number normalization, and media handling. Telegram is significantly simpler — a single bot token from @BotFather.
 
@@ -335,127 +426,85 @@ public class TelegramChannel : ITelegramChannel
 
 ---
 
-## 5. Copilot SDK Integration
+## 6. LLM Integration (Semantic Kernel + OpenRouter)
 
-This is the core replacement for NanoClaw's Docker container + Claude Agent SDK pipeline. Instead of spawning a container with `claude --model ... --system-prompt ...`, we create an in-process `CopilotClient` that manages a `copilot` CLI subprocess.
+This is the core replacement for NanoClaw's Docker container + Claude Agent SDK pipeline. Instead of spawning containers, we use **Semantic Kernel** for orchestration with **OpenRouter** as the LLM provider — giving access to 200+ models (Claude, GPT-4o, Gemini, Llama, etc.) through a single OpenAI-compatible API.
 
-### CopilotSessionManager.cs
+### AgentOrchestrator.cs
 
 ```csharp
-using GitHub.Copilot.SDK;
+using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.ChatCompletion;
+using Microsoft.SemanticKernel.Connectors.OpenAI;
 
-namespace ClawPilot.Copilot;
+namespace ClawPilot.AI;
 
 /// <summary>
-/// Manages the CopilotClient lifecycle and per-conversation sessions.
+/// Manages the Semantic Kernel lifecycle and per-conversation chat history.
 /// Replaces NanoClaw's container-runner.ts + agent-runner entirely.
+///
+/// Uses OpenRouter as the LLM provider via the OpenAI-compatible connector.
+/// This gives access to Claude, GPT-4o, Gemini, Llama, and 200+ other models
+/// through a single API key and endpoint.
 /// </summary>
-public class CopilotSessionManager : IAsyncDisposable
+public class AgentOrchestrator : IDisposable
 {
-    private readonly CopilotClient _client;
-    private readonly ToolRegistry _toolRegistry;
-    private readonly HookHandlers _hooks;
-    private readonly ILogger<CopilotSessionManager> _logger;
+    private readonly Kernel _kernel;
+    private readonly IChatCompletionService _chatService;
+    private readonly MemoryService _memory;
+    private readonly ILogger<AgentOrchestrator> _logger;
     private readonly ClawPilotOptions _options;
 
-    // Active sessions keyed by conversation ID (chat ID string)
-    private readonly ConcurrentDictionary<string, CopilotSession> _sessions = new();
-    private readonly SemaphoreSlim _sessionLock = new(1, 1);
+    // Per-conversation chat history (replaces NanoClaw's per-container sessions)
+    private readonly ConcurrentDictionary<string, ChatHistory> _histories = new();
+    private readonly SemaphoreSlim _historyLock = new(1, 1);
 
-    public CopilotSessionManager(
-        ToolRegistry toolRegistry,
-        HookHandlers hooks,
+    public AgentOrchestrator(
+        MemoryService memory,
         IOptions<ClawPilotOptions> options,
-        ILogger<CopilotSessionManager> logger)
+        ILogger<AgentOrchestrator> logger)
     {
-        _toolRegistry = toolRegistry;
-        _hooks = hooks;
+        _memory = memory;
         _options = options.Value;
         _logger = logger;
 
-        _client = new CopilotClient(new CopilotClientOptions
+        // Build SK Kernel with OpenRouter as the chat completion backend.
+        // OpenRouter exposes an OpenAI-compatible API, so we use the
+        // standard OpenAI connector with a custom base URL.
+        var builder = Kernel.CreateBuilder();
+
+        builder.AddOpenAIChatCompletion(
+            modelId: _options.Model ?? "anthropic/claude-sonnet-4-20250514",
+            apiKey: _options.OpenRouterApiKey,
+            endpoint: new Uri("https://openrouter.ai/api/v1")
+        );
+
+        // Register plugins (replaces NanoClaw's IPC MCP tools)
+        builder.Plugins.AddFromType<MessagingPlugin>();
+        builder.Plugins.AddFromType<SchedulerPlugin>();
+        builder.Plugins.AddFromType<UtilityPlugin>();
+
+        _kernel = builder.Build();
+        _chatService = _kernel.GetRequiredService<IChatCompletionService>();
+    }
+
+    /// <summary>
+    /// Get or create chat history for a conversation.
+    /// Maps to NanoClaw's per-container agent lifecycle.
+    /// </summary>
+    public ChatHistory GetOrCreateHistory(string conversationId, string systemPrompt)
+    {
+        return _histories.GetOrAdd(conversationId, _ =>
         {
-            // Optional: BYOK for custom model provider
-            // Provider = new ProviderConfig
-            // {
-            //     Type = "openai",
-            //     BaseUrl = "https://api.openai.com/v1",
-            //     ApiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY"),
-            // },
+            var history = new ChatHistory();
+            history.AddSystemMessage(systemPrompt);
+            _logger.LogInformation("Created chat history for conversation {Id}", conversationId);
+            return history;
         });
     }
 
-    public async Task StartAsync(CancellationToken ct = default)
-    {
-        await _client.StartAsync(ct);
-        _logger.LogInformation("Copilot client started");
-    }
-
     /// <summary>
-    /// Get or create a session for a given conversation.
-    /// Maps to NanoClaw's per-container agent lifecycle.
-    /// </summary>
-    public async Task<CopilotSession> GetOrCreateSessionAsync(
-        string conversationId,
-        string systemPrompt,
-        CancellationToken ct = default)
-    {
-        if (_sessions.TryGetValue(conversationId, out var existing))
-            return existing;
-
-        await _sessionLock.WaitAsync(ct);
-        try
-        {
-            // Double-check after acquiring lock
-            if (_sessions.TryGetValue(conversationId, out existing))
-                return existing;
-
-            var session = await _client.CreateSessionAsync(new SessionConfig
-            {
-                Model = _options.Model ?? "gpt-4o",
-
-                // Use conversationId as sessionId for persistence/resume
-                SessionId = $"clawpilot-{conversationId}",
-
-                // System prompt — equivalent to NanoClaw's CLAUDE.md injection
-                SystemMessage = new SystemMessageConfig
-                {
-                    Mode = SystemMessageMode.Append,
-                    Content = systemPrompt,
-                },
-
-                // Register custom tools (replaces NanoClaw's IPC MCP tools)
-                Tools = _toolRegistry.GetTools(),
-
-                // Auto-approve all tool calls (like NanoClaw's PermissionMode.AutoApproval)
-                OnPermissionRequest = PermissionHandler.ApproveAll,
-
-                // Hooks for security, logging, context injection
-                Hooks = _hooks.CreateHooks(),
-
-                // Infinite sessions with auto-compaction
-                // (NanoClaw truncates at 200k tokens)
-                InfiniteSessions = new InfiniteSessionConfig
-                {
-                    Enabled = true,
-                },
-
-                // Enable streaming for real-time "typing" indicators
-                Streaming = true,
-            }, ct);
-
-            _sessions[conversationId] = session;
-            _logger.LogInformation("Created session for conversation {Id}", conversationId);
-            return session;
-        }
-        finally
-        {
-            _sessionLock.Release();
-        }
-    }
-
-    /// <summary>
-    /// Send a message and wait for the complete response.
+    /// Send a message and get the complete response.
     /// This is the primary entry point — replaces NanoClaw's
     /// container spawn → IPC write → IPC read pipeline.
     /// </summary>
@@ -465,38 +514,50 @@ public class CopilotSessionManager : IAsyncDisposable
         string systemPrompt,
         CancellationToken ct = default)
     {
-        var session = await GetOrCreateSessionAsync(conversationId, systemPrompt, ct);
+        var history = GetOrCreateHistory(conversationId, systemPrompt);
 
-        var reply = await session.SendAndWaitAsync(new MessageOptions
+        // Retrieve relevant memories for RAG context injection
+        var memories = await _memory.RecallAsync(conversationId, userMessage, limit: 5, ct);
+        if (memories.Any())
         {
-            Prompt = userMessage,
-        }, ct);
+            var memoryContext = string.Join("\n", memories.Select(m => $"- {m}"));
+            history.AddSystemMessage($"Relevant context from memory:\n{memoryContext}");
+        }
 
-        return reply?.Data?.Content ?? "[No response from Copilot]";
+        history.AddUserMessage(userMessage);
+
+        // Enable auto function calling (SK handles tool invocation automatically)
+        var settings = new OpenAIPromptExecutionSettings
+        {
+            FunctionChoiceBehavior = FunctionChoiceBehavior.Auto(),
+            MaxTokens = _options.MaxResponseTokens,
+        };
+
+        var result = await _chatService.GetChatMessageContentAsync(
+            history, settings, _kernel, ct);
+
+        var response = result.Content ?? "[No response]";
+        history.AddAssistantMessage(response);
+
+        // Store interaction in vector memory for future retrieval
+        await _memory.SaveAsync(conversationId, userMessage, response, ct);
+
+        return response;
     }
 
     /// <summary>
-    /// Clean up a session when a conversation is reset or archived.
+    /// Reset a conversation's history.
     /// Equivalent to NanoClaw's container cleanup.
     /// </summary>
-    public async Task DestroySessionAsync(string conversationId)
+    public void ResetConversation(string conversationId)
     {
-        if (_sessions.TryRemove(conversationId, out var session))
-        {
-            await session.DisposeAsync();
-            _logger.LogInformation("Destroyed session for conversation {Id}", conversationId);
-        }
+        if (_histories.TryRemove(conversationId, out _))
+            _logger.LogInformation("Reset history for conversation {Id}", conversationId);
     }
 
-    public async ValueTask DisposeAsync()
+    public void Dispose()
     {
-        foreach (var (id, session) in _sessions)
-        {
-            await session.DisposeAsync();
-        }
-        _sessions.Clear();
-
-        await _client.DisposeAsync();
+        _histories.Clear();
     }
 }
 ```
@@ -505,35 +566,43 @@ public class CopilotSessionManager : IAsyncDisposable
 
 | NanoClaw | ClawPilot |
 |---|---|
-| `spawnContainer()` → Docker run | `_client.CreateSessionAsync()` → in-process |
-| Write to IPC file → agent reads stdin | `session.SendAndWaitAsync()` → JSON-RPC |
-| Agent runs Claude SDK in container | Copilot SDK talks to `copilot` CLI subprocess |
-| Read IPC file for response | `SendAndWaitAsync` returns `AssistantMessageEvent` |
-| Container dies after timeout | Session persists, auto-compacts (infinite sessions) |
-| ~5-10s container startup overhead | ~instant (session creation is lightweight) |
+| `spawnContainer()` → Docker run | `Kernel.CreateBuilder()` → in-process SK kernel |
+| Write to IPC file → agent reads stdin | `chatService.GetChatMessageContentAsync()` → HTTP to OpenRouter |
+| Agent runs Claude SDK in container | SK orchestrator calls OpenRouter API |
+| Read IPC file for response | `ChatMessageContent.Content` returned directly |
+| Container dies after timeout | Chat history persists in memory, key facts in sqlite-vec |
+| ~5-10s container startup overhead | ~instant (HTTP request to OpenRouter) |
+| Locked to Claude models only | Any model via OpenRouter (Claude, GPT, Gemini, Llama, etc.) |
 
-### BYOK (Bring Your Own Key) Configuration
+### OpenRouter Configuration
 
-If you want to use a different model provider instead of Copilot's default:
+OpenRouter works as a drop-in replacement for the OpenAI API. The key benefit: **one API key, 200+ models**.
 
 ```csharp
-// In CopilotSessionManager constructor or config
-var client = new CopilotClient(new CopilotClientOptions
+// The SK OpenAI connector works with OpenRouter out of the box
+// by simply overriding the endpoint URL.
+builder.AddOpenAIChatCompletion(
+    modelId: "anthropic/claude-sonnet-4-20250514",    // or "openai/gpt-4o", "google/gemini-2.0-flash", etc.
+    apiKey: config.OpenRouterApiKey,
+    endpoint: new Uri("https://openrouter.ai/api/v1")
+);
+```
+
+Alternatively, use `OpenRouter.NET` for richer OpenRouter-specific features (model listing, cost tracking):
+
+```csharp
+// Optional: OpenRouter.NET for advanced features
+var openRouter = new OpenRouterClient(config.OpenRouterApiKey);
+var completion = await openRouter.CreateChatCompletionAsync(new ChatCompletionRequest
 {
-    Provider = new ProviderConfig
-    {
-        Type = "openai",         // or "azure", "anthropic", "ollama"
-        BaseUrl = "https://api.openai.com/v1",
-        ApiKey = config["OpenAI:ApiKey"],
-    },
+    Model = "anthropic/claude-sonnet-4-20250514",
+    Messages = [new ChatMessage { Role = "user", Content = "Hello!" }],
 });
 ```
 
-Supported providers: `openai`, `azure`, `anthropic`, `ollama` — any OpenAI-compatible endpoint.
-
 ---
 
-## 6. Database Layer
+## 7. Database Layer & Vector Memory
 
 NanoClaw uses raw `better-sqlite3` with hand-written SQL. ClawPilot uses **EF Core with SQLite** for type safety and migrations.
 
@@ -555,7 +624,7 @@ public class Conversation
     /// <summary>Whether this is a group chat</summary>
     public bool IsGroup { get; set; }
 
-    /// <summary>Copilot session ID for resume</summary>
+    /// <summary>Session identifier for LLM context resume</summary>
     public string? SessionId { get; set; }
 
     /// <summary>Custom system prompt override</summary>
@@ -644,9 +713,109 @@ public class ClawPilotDbContext : DbContext
 
 NanoClaw has these tables: `conversations`, `messages`, `conversation_permissions`, `scheduled_tasks`, `auth_sessions`. ClawPilot drops `auth_sessions` (Telegram needs no auth flow) and `conversation_permissions` (simplified — use `AllowedChatIds` config). The core `conversations` + `messages` + `scheduled_tasks` carry over directly.
 
+### Vector Memory with sqlite-vec
+
+A key addition from the deep research: ClawPilot uses **sqlite-vec** for semantic retrieval — something NanoClaw entirely lacks. This allows the agent to recall relevant past conversations, facts, and context via embedding similarity search, all within the same SQLite database file.
+
+The [sqlite-vec extension](https://github.com/asg017/sqlite-vec) adds native vector types and SIMD-accelerated kNN distance functions to SQLite. Semantic Kernel's `SqliteVec` connector provides a high-level .NET API on top.
+
+#### MemoryService.cs
+
+```csharp
+using Microsoft.SemanticKernel.Memory;
+using Microsoft.SemanticKernel.Connectors.SqliteVec;
+using Microsoft.SemanticKernel.Connectors.OpenAI;
+
+namespace ClawPilot.AI;
+
+/// <summary>
+/// Vector memory service using sqlite-vec for semantic search.
+/// Stores conversation summaries and key facts as embeddings
+/// in the same SQLite database used for relational data.
+///
+/// This is a new capability — NanoClaw has no equivalent.
+/// Based on findings from the deep research report:
+///   - SK provides SqliteVectorStore connector (preview)
+///   - sqlite-vec adds VIRTUAL TABLE for kNN search
+///   - Embeddings generated via OpenRouter or a dedicated embedding model
+/// </summary>
+public class MemoryService : IAsyncDisposable
+{
+    private readonly ISemanticTextMemory _memory;
+    private const string CollectionName = "conversations";
+
+    public MemoryService(ClawPilotOptions options)
+    {
+        // Build memory store backed by sqlite-vec
+        // The SqliteVec connector creates vec_ virtual tables automatically
+        var memoryBuilder = new MemoryBuilder();
+
+        memoryBuilder.WithSqliteVecMemoryStore(options.DatabasePath);
+
+        // Use OpenRouter for embeddings too (or a local model)
+        memoryBuilder.WithOpenAITextEmbeddingGeneration(
+            modelId: "openai/text-embedding-3-small",
+            apiKey: options.OpenRouterApiKey,
+            endpoint: new Uri("https://openrouter.ai/api/v1")
+        );
+
+        _memory = memoryBuilder.Build();
+    }
+
+    /// <summary>
+    /// Save a conversation exchange as a searchable memory.
+    /// </summary>
+    public async Task SaveAsync(
+        string conversationId, string userMessage, string assistantResponse,
+        CancellationToken ct = default)
+    {
+        var id = $"{conversationId}-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+        var text = $"User: {userMessage}\nAssistant: {assistantResponse}";
+
+        await _memory.SaveInformationAsync(
+            CollectionName, text, id,
+            description: $"Chat {conversationId}",
+            additionalMetadata: conversationId,
+            cancellationToken: ct);
+    }
+
+    /// <summary>
+    /// Recall relevant memories for a given query (RAG).
+    /// </summary>
+    public async Task<List<string>> RecallAsync(
+        string conversationId, string query, int limit = 5,
+        CancellationToken ct = default)
+    {
+        var results = new List<string>();
+        await foreach (var result in _memory.SearchAsync(
+            CollectionName, query, limit, minRelevanceScore: 0.7,
+            cancellationToken: ct))
+        {
+            results.Add(result.Metadata.Text);
+        }
+        return results;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_memory is IAsyncDisposable disposable)
+            await disposable.DisposeAsync();
+    }
+}
+```
+
+#### How Vector Memory Enhances the Agent
+
+| Scenario | Without vector memory | With sqlite-vec |
+|---|---|---|
+| "What did I ask about last week?" | Agent has no recall beyond current session | Semantic search finds relevant past exchanges |
+| Long conversations (context overflow) | History truncated, context lost | Key facts persist as embeddings, recalled via RAG |
+| Cross-conversation knowledge | Each chat is fully isolated | Shared memory collection enables knowledge transfer |
+| User preferences | Must be re-stated each session | Stored as embeddings, recalled when relevant |
+
 ---
 
-## 7. Session & Conversation Management
+## 8. Session & Conversation Management
 
 NanoClaw's `processMessages()` loop polls SQLite every 2 seconds for pending messages. ClawPilot uses an **event-driven** approach — Telegram.Bot fires events immediately, which are enqueued into a `System.Threading.Channels.Channel` for ordered processing.
 
@@ -664,7 +833,7 @@ namespace ClawPilot.Services;
 public class MessageProcessorService : BackgroundService
 {
     private readonly Channel<IncomingMessage> _messageQueue;
-    private readonly CopilotSessionManager _copilot;
+    private readonly AgentOrchestrator _agent;
     private readonly ITelegramChannel _telegram;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<MessageProcessorService> _logger;
@@ -676,14 +845,14 @@ public class MessageProcessorService : BackgroundService
 
     public MessageProcessorService(
         Channel<IncomingMessage> messageQueue,
-        CopilotSessionManager copilot,
+        AgentOrchestrator agent,
         ITelegramChannel telegram,
         IServiceScopeFactory scopeFactory,
         IOptions<ClawPilotOptions> options,
         ILogger<MessageProcessorService> logger)
     {
         _messageQueue = messageQueue;
-        _copilot = copilot;
+        _agent = agent;
         _telegram = telegram;
         _scopeFactory = scopeFactory;
         _options = options.Value;
@@ -733,8 +902,8 @@ public class MessageProcessorService : BackgroundService
             // Build system prompt (NanoClaw reads from groups/main/CLAUDE.md)
             var systemPrompt = BuildSystemPrompt(conversation, message);
 
-            // Send to Copilot and get response
-            var response = await _copilot.SendMessageAsync(
+            // Send to SK agent (OpenRouter) and get response
+            var response = await _agent.SendMessageAsync(
                 chatKey, message.Text, systemPrompt, ct);
 
             // Persist assistant response
@@ -800,115 +969,83 @@ public class MessageProcessorService : BackgroundService
 
 ### Session Persistence / Resume
 
-NanoClaw tracks conversation state in SQLite and passes full history to each container run. Copilot SDK has **native session persistence** — pass a custom `sessionId` and resume later:
+NanoClaw tracks conversation state in SQLite and passes full history to each container run.
+
+ClawPilot uses a **two-tier persistence** approach:
+
+1. **In-memory `ChatHistory`**: SK's `ChatHistory` object holds the rolling conversation window per chat. Fast, supports function calling context.
+2. **sqlite-vec vector memory**: Key exchanges are embedded and stored for long-term semantic retrieval (RAG). Survives process restarts.
 
 ```csharp
-// Creating with a deterministic session ID
-var session = await client.CreateSessionAsync(new SessionConfig
+// On startup: rebuild ChatHistory from recent DB messages
+public async Task RestoreSessionAsync(string conversationId, ClawPilotDbContext db)
 {
-    SessionId = $"clawpilot-{chatId}",  // deterministic per chat
-    // ... other config
-});
+    var recentMessages = await db.Messages
+        .Where(m => m.Conversation.ChatId == conversationId)
+        .OrderByDescending(m => m.CreatedAt)
+        .Take(50)  // last 50 messages as rolling window
+        .OrderBy(m => m.CreatedAt)
+        .ToListAsync();
 
-// Later, resume the same session (conversation history preserved server-side)
-var resumed = await client.ResumeSessionAsync($"clawpilot-{chatId}");
+    var history = GetOrCreateHistory(conversationId, "...");
+    foreach (var msg in recentMessages)
+    {
+        if (msg.Role == "user") history.AddUserMessage(msg.Content);
+        else if (msg.Role == "assistant") history.AddAssistantMessage(msg.Content);
+    }
+}
 ```
 
-This eliminates NanoClaw's need to store and replay full message history.
+For older context beyond the rolling window, the vector memory service automatically injects relevant past exchanges via RAG (see section 7).
 
 ---
 
-## 8. Tool System (IPC Replacement)
+## 9. Tool System (IPC Replacement)
 
-NanoClaw exposes tools to Claude via a custom MCP stdio server (`ipc-mcp-stdio.ts`) inside each container. The agent-runner pipes tool calls through file-based IPC. ClawPilot replaces this entirely with **Copilot SDK custom tools** registered via `AIFunctionFactory`.
+NanoClaw exposes tools to Claude via a custom MCP stdio server (`ipc-mcp-stdio.ts`) inside each container. The agent-runner pipes tool calls through file-based IPC. ClawPilot replaces this entirely with **Semantic Kernel plugins** — native C# classes decorated with `[KernelFunction]` attributes that SK's auto function calling invokes automatically.
 
-### ToolRegistry.cs
+### MessagingPlugin.cs
 
 ```csharp
-using GitHub.Copilot.SDK;
-using Microsoft.Extensions.AI;
+using Microsoft.SemanticKernel;
+using System.ComponentModel;
 
-namespace ClawPilot.Copilot;
+namespace ClawPilot.AI.Plugins;
 
 /// <summary>
-/// Registers custom tools available to the Copilot agent.
-/// Replaces NanoClaw's IPC MCP server tools:
-///   - send_message, schedule_task, get_current_datetime, etc.
+/// SK plugin for messaging tools.
+/// Replaces NanoClaw's "send_message" and "search_messages" IPC MCP tools.
+///
+/// SK plugins use [KernelFunction] attributes — the Kernel automatically
+/// exposes these as tool definitions to the LLM and handles invocation.
+/// No AIFunctionFactory or manual registration needed.
 /// </summary>
-public class ToolRegistry
+public class MessagingPlugin
 {
     private readonly ITelegramChannel _telegram;
     private readonly IServiceScopeFactory _scopeFactory;
-    private readonly ILogger<ToolRegistry> _logger;
 
-    public ToolRegistry(
-        ITelegramChannel telegram,
-        IServiceScopeFactory scopeFactory,
-        ILogger<ToolRegistry> logger)
+    public MessagingPlugin(ITelegramChannel telegram, IServiceScopeFactory scopeFactory)
     {
         _telegram = telegram;
         _scopeFactory = scopeFactory;
-        _logger = logger;
     }
 
-    public AIFunction[] GetTools()
-    {
-        return
-        [
-            // Equivalent to NanoClaw's "send_message" MCP tool
-            AIFunctionFactory.Create(SendMessageTool,
-                "send_message",
-                "Send a message to a Telegram chat. Use this to proactively message the user."),
-
-            // Equivalent to NanoClaw's "schedule_task" MCP tool
-            AIFunctionFactory.Create(ScheduleTaskTool,
-                "schedule_task",
-                "Schedule a recurring task. Takes a description and cron expression."),
-
-            // Equivalent to NanoClaw's "get_current_datetime" MCP tool
-            AIFunctionFactory.Create(GetCurrentDateTimeTool,
-                "get_current_datetime",
-                "Get the current date and time in UTC and the user's timezone."),
-
-            // Equivalent to NanoClaw's "search_messages" MCP tool
-            AIFunctionFactory.Create(SearchMessagesTool,
-                "search_messages",
-                "Search past conversation messages by keyword."),
-        ];
-    }
-
-    private async Task<string> SendMessageTool(string chatId, string message)
+    [KernelFunction("send_message")]
+    [Description("Send a message to a Telegram chat. Use this to proactively message the user.")]
+    public async Task<string> SendMessageAsync(
+        [Description("The Telegram chat ID to send to")] string chatId,
+        [Description("The message text")] string message)
     {
         await _telegram.SendTextAsync(long.Parse(chatId), message);
         return $"Message sent to {chatId}";
     }
 
-    private async Task<string> ScheduleTaskTool(
-        string chatId, string description, string cronExpression)
-    {
-        using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<ClawPilotDbContext>();
-
-        db.ScheduledTasks.Add(new ScheduledTask
-        {
-            ChatId = chatId,
-            Description = description,
-            CronExpression = cronExpression,
-        });
-        await db.SaveChangesAsync();
-
-        return $"Task scheduled: {description} ({cronExpression})";
-    }
-
-    private Task<string> GetCurrentDateTimeTool()
-    {
-        var utcNow = DateTimeOffset.UtcNow;
-        return Task.FromResult(
-            $"UTC: {utcNow:yyyy-MM-dd HH:mm:ss}\n" +
-            $"Unix: {utcNow.ToUnixTimeSeconds()}");
-    }
-
-    private async Task<string> SearchMessagesTool(string query, int limit = 20)
+    [KernelFunction("search_messages")]
+    [Description("Search past conversation messages by keyword. Returns matching messages with sender and timestamp.")]
+    public async Task<string> SearchMessagesAsync(
+        [Description("The search query")] string query,
+        [Description("Max results to return")] int limit = 20)
     {
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ClawPilotDbContext>();
@@ -925,59 +1062,124 @@ public class ToolRegistry
 }
 ```
 
-### MCP Server Integration (Optional)
-
-For more complex tool ecosystems, Copilot SDK supports external MCP servers directly:
+### SchedulerPlugin.cs
 
 ```csharp
-var session = await client.CreateSessionAsync(new SessionConfig
+using Microsoft.SemanticKernel;
+using System.ComponentModel;
+
+namespace ClawPilot.AI.Plugins;
+
+public class SchedulerPlugin
 {
-    McpServers = new Dictionary<string, object>
+    private readonly IServiceScopeFactory _scopeFactory;
+
+    public SchedulerPlugin(IServiceScopeFactory scopeFactory) => _scopeFactory = scopeFactory;
+
+    [KernelFunction("schedule_task")]
+    [Description("Schedule a recurring task. Takes a description and cron expression.")]
+    public async Task<string> ScheduleTaskAsync(
+        [Description("Chat ID to run task for")] string chatId,
+        [Description("What the task should do")] string description,
+        [Description("Cron expression for scheduling")] string cronExpression)
     {
-        // Example: filesystem MCP server for file access
-        ["filesystem"] = new McpLocalServerConfig
-        {
-            Type = "local",
-            Command = "npx",
-            Args = new List<string> { "-y", "@modelcontextprotocol/server-filesystem", "/data" },
-            Tools = new List<string> { "*" },
-        },
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ClawPilotDbContext>();
 
-        // Example: GitHub MCP server
-        ["github"] = new McpLocalServerConfig
+        db.ScheduledTasks.Add(new ScheduledTask
         {
-            Type = "local",
-            Command = "npx",
-            Args = new List<string> { "-y", "@modelcontextprotocol/server-github" },
-            Env = new Dictionary<string, string>
-            {
-                ["GITHUB_TOKEN"] = Environment.GetEnvironmentVariable("GITHUB_TOKEN")!,
-            },
-            Tools = new List<string> { "*" },
-        },
+            ChatId = chatId,
+            Description = description,
+            CronExpression = cronExpression,
+        });
+        await db.SaveChangesAsync();
+
+        return $"Task scheduled: {description} ({cronExpression})";
+    }
+}
+```
+
+### UtilityPlugin.cs
+
+```csharp
+using Microsoft.SemanticKernel;
+using System.ComponentModel;
+
+namespace ClawPilot.AI.Plugins;
+
+public class UtilityPlugin
+{
+    [KernelFunction("get_current_datetime")]
+    [Description("Get the current date and time in UTC.")]
+    public string GetCurrentDateTime()
+    {
+        var utcNow = DateTimeOffset.UtcNow;
+        return $"UTC: {utcNow:yyyy-MM-dd HH:mm:ss}\nUnix: {utcNow.ToUnixTimeSeconds()}";
+    }
+
+    [KernelFunction("recall_memory")]
+    [Description("Search long-term memory for relevant past conversations and facts.")]
+    public async Task<string> RecallMemoryAsync(
+        [Description("What to search for")] string query,
+        Kernel kernel)
+    {
+        // Use the MemoryService registered in the kernel
+        var memory = kernel.GetRequiredService<MemoryService>();
+        var results = await memory.RecallAsync("global", query, limit: 5);
+        return results.Any()
+            ? string.Join("\n---\n", results)
+            : "No relevant memories found.";
+    }
+}
+```
+
+### MCP Server Integration (Optional)
+
+For complex tool ecosystems, SK supports external MCP servers. This is useful for integrating third-party tools without writing C# plugins:
+
+```csharp
+// SK supports MCP via the Microsoft.SemanticKernel.Connectors.MCP package
+// Example: add a filesystem MCP server
+var mcpPlugin = await kernel.ImportMcpPluginAsync("filesystem", new McpStdioConfig
+{
+    Command = "npx",
+    Args = ["-y", "@modelcontextprotocol/server-filesystem", "/data"],
+});
+
+// Example: add a GitHub MCP server
+var githubPlugin = await kernel.ImportMcpPluginAsync("github", new McpStdioConfig
+{
+    Command = "npx",
+    Args = ["-y", "@modelcontextprotocol/server-github"],
+    Env = new Dictionary<string, string>
+    {
+        ["GITHUB_TOKEN"] = Environment.GetEnvironmentVariable("GITHUB_TOKEN")!,
     },
-
-    // Custom tools AND MCP tools work together
-    Tools = toolRegistry.GetTools(),
 });
 ```
 
 ---
 
-## 9. Hooks & Security
+## 10. Hooks & Security
 
-NanoClaw has a specific `PreToolUse` bash command sanitization hook in the container-runner that checks for shell command patterns. The Copilot SDK has a full hook system.
+NanoClaw has a specific `PreToolUse` bash command sanitization hook in the container-runner that checks for shell command patterns. Semantic Kernel provides an equivalent system via **function invocation filters** — middleware that runs before/after every tool call.
 
-### HookHandlers.cs
+### SecurityFilter.cs
 
 ```csharp
-using GitHub.Copilot.SDK;
+using Microsoft.SemanticKernel;
 
-namespace ClawPilot.Copilot;
+namespace ClawPilot.AI.Filters;
 
-public class HookHandlers
+/// <summary>
+/// SK function invocation filter for security.
+/// Replaces NanoClaw's PreToolUse bash sanitization hook.
+///
+/// They intercept function calls before and after execution.
+/// </summary>
+public class SecurityFilter : IFunctionInvocationFilter
 {
-    private readonly ILogger<HookHandlers> _logger;
+    private readonly ILogger<SecurityFilter> _logger;
 
     // Dangerous tool patterns to block
     // (NanoClaw blocks bash commands with 'rm -rf', 'sudo', etc.)
@@ -987,88 +1189,57 @@ public class HookHandlers
     private static readonly string[] DangerousArgPatterns =
         ["rm -rf", "sudo", "chmod 777", "mkfs", "> /dev/"];
 
-    public HookHandlers(ILogger<HookHandlers> logger)
+    public SecurityFilter(ILogger<SecurityFilter> logger)
     {
         _logger = logger;
     }
 
-    public SessionHooks CreateHooks() => new()
+    public async Task OnFunctionInvocationAsync(
+        FunctionInvocationContext context, Func<FunctionInvocationContext, Task> next)
     {
-        OnPreToolUse = OnPreToolUseAsync,
-        OnPostToolUse = OnPostToolUseAsync,
-        OnSessionStart = OnSessionStartAsync,
-        OnErrorOccurred = OnErrorOccurredAsync,
-    };
+        var functionName = context.Function.Name;
+        var args = context.Arguments?.ToString() ?? "";
 
-    private Task<PreToolUseHookOutput?> OnPreToolUseAsync(
-        PreToolUseHookInput input, HookInvocation invocation)
-    {
-        _logger.LogDebug("[{SessionId}] PreToolUse: {Tool} args={Args}",
-            invocation.SessionId, input.ToolName, input.ToolArgs);
+        _logger.LogDebug("Pre-invocation: {Function} args={Args}", functionName, args);
 
         // Block dangerous tools entirely
         if (BlockedToolPatterns.Any(p =>
-            input.ToolName.Contains(p, StringComparison.OrdinalIgnoreCase)))
+            functionName.Contains(p, StringComparison.OrdinalIgnoreCase)))
         {
-            _logger.LogWarning("Blocked tool: {Tool}", input.ToolName);
-            return Task.FromResult<PreToolUseHookOutput?>(new PreToolUseHookOutput
-            {
-                PermissionDecision = "deny",
-                PermissionDecisionReason =
-                    $"Tool '{input.ToolName}' is not permitted in ClawPilot",
-            });
+            _logger.LogWarning("Blocked tool: {Function}", functionName);
+            context.Result = new FunctionResult(context.Function,
+                $"Tool '{functionName}' is not permitted in ClawPilot");
+            return; // Skip execution
         }
 
         // Check for dangerous argument patterns
-        var argsJson = input.ToolArgs?.ToString() ?? "";
         if (DangerousArgPatterns.Any(p =>
-            argsJson.Contains(p, StringComparison.OrdinalIgnoreCase)))
+            args.Contains(p, StringComparison.OrdinalIgnoreCase)))
         {
-            _logger.LogWarning("Blocked dangerous args in {Tool}: {Args}",
-                input.ToolName, argsJson);
-            return Task.FromResult<PreToolUseHookOutput?>(new PreToolUseHookOutput
-            {
-                PermissionDecision = "deny",
-                PermissionDecisionReason = "Arguments contain blocked patterns",
-            });
+            _logger.LogWarning("Blocked dangerous args in {Function}: {Args}",
+                functionName, args);
+            context.Result = new FunctionResult(context.Function,
+                "Arguments contain blocked patterns");
+            return;
         }
 
-        return Task.FromResult<PreToolUseHookOutput?>(new PreToolUseHookOutput
-        {
-            PermissionDecision = "allow",
-        });
-    }
+        // Allow execution
+        await next(context);
 
-    private Task<PostToolUseHookOutput?> OnPostToolUseAsync(
-        PostToolUseHookInput input, HookInvocation invocation)
-    {
-        _logger.LogDebug("[{SessionId}] PostToolUse: result length={Len}",
-            invocation.SessionId, input.ToolResult?.ToString()?.Length ?? 0);
-
-        // Could sanitize output here (strip secrets, PII, etc.)
-        return Task.FromResult<PostToolUseHookOutput?>(null);
-    }
-
-    private Task<SessionStartHookOutput?> OnSessionStartAsync(
-        SessionStartHookInput input, HookInvocation invocation)
-    {
-        // Inject runtime context (like NanoClaw's dynamic system prompt additions)
-        return Task.FromResult<SessionStartHookOutput?>(new SessionStartHookOutput
-        {
-            AdditionalContext =
-                $"Current UTC time: {DateTimeOffset.UtcNow:O}\n" +
-                "You are ClawPilot, a personal assistant running on Telegram.",
-        });
-    }
-
-    private Task<ErrorHookOutput?> OnErrorOccurredAsync(
-        ErrorHookInput input, HookInvocation invocation)
-    {
-        _logger.LogError("Session {SessionId} error: {Error}",
-            invocation.SessionId, input.Error);
-        return Task.FromResult<ErrorHookOutput?>(null);
+        // Post-invocation: log result length, could sanitize output
+        var resultLen = context.Result?.ToString()?.Length ?? 0;
+        _logger.LogDebug("Post-invocation: {Function} result length={Len}",
+            functionName, resultLen);
     }
 }
+```
+
+### Registering the Filter
+
+```csharp
+// In AgentOrchestrator or Program.cs
+var builder = Kernel.CreateBuilder();
+builder.Services.AddSingleton<IFunctionInvocationFilter, SecurityFilter>();
 ```
 
 ### Security Model Comparison
@@ -1077,14 +1248,15 @@ public class HookHandlers
 |---|---|
 | Docker isolation per agent | In-process (less isolation, but no shell access) |
 | Mount allow-list (`mount-security.ts`) | Not needed — no filesystem mounts |
-| PreToolUse bash sanitization | `OnPreToolUse` hook with deny patterns |
+| PreToolUse bash sanitization | SK `IFunctionInvocationFilter` with deny patterns |
 | Network namespace per container | Process-level (consider restricting MCP servers) |
 | `PHONE_ID` env whitelist | `AllowedChatIds` config array |
-| File-based IPC (temp files) | In-memory JSON-RPC (no temp files) |
+| File-based IPC (temp files) | In-memory function calls (no temp files) |
+| — | SK `IFunctionInvocationFilter` (native filter pipeline) |
 
 ---
 
-## 10. Group Chat Support
+## 11. Group Chat Support
 
 NanoClaw has `group-queue.ts` — a `Map<groupJid, Promise>` that serializes concurrent messages within the same group to avoid race conditions. ClawPilot uses `System.Threading.Channels`.
 
@@ -1169,7 +1341,7 @@ private bool ShouldRespondInGroup(Message message)
 
 ---
 
-## 11. Configuration System
+## 12. Configuration System
 
 NanoClaw uses `.env` files parsed by `env.ts` with manual `Bun.env` reads. ClawPilot uses the standard .NET configuration system.
 
@@ -1181,9 +1353,12 @@ NanoClaw uses `.env` files parsed by `env.ts` with manual `Bun.env` reads. ClawP
     "TelegramBotToken": "",
     "BotUsername": "@ClawPilotBot",
     "AllowedChatIds": ["123456789", "-1001234567890"],
-    "Model": "gpt-4o",
+    "OpenRouterApiKey": "",
+    "Model": "anthropic/claude-sonnet-4-20250514",
+    "EmbeddingModel": "openai/text-embedding-3-small",
     "SystemPrompt": "You are ClawPilot, a personal AI assistant on Telegram. You are helpful, concise, and proactive.",
     "DatabasePath": "clawpilot.db",
+    "MaxResponseTokens": 4096,
     "MaxResponseLength": 4096,
     "SessionTimeoutMinutes": 60
   },
@@ -1214,39 +1389,35 @@ public class ClawPilotOptions
     public required string TelegramBotToken { get; set; }
     public string BotUsername { get; set; } = "@ClawPilotBot";
     public HashSet<string> AllowedChatIds { get; set; } = [];
-    public string? Model { get; set; } = "gpt-4o";
+
+    // OpenRouter — primary LLM provider
+    public required string OpenRouterApiKey { get; set; }
+    public string Model { get; set; } = "anthropic/claude-sonnet-4-20250514";
+    public string EmbeddingModel { get; set; } = "openai/text-embedding-3-small";
+
     public string? SystemPrompt { get; set; }
     public string DatabasePath { get; set; } = "clawpilot.db";
+    public int MaxResponseTokens { get; set; } = 4096;
     public int MaxResponseLength { get; set; } = 4096;
     public int SessionTimeoutMinutes { get; set; } = 60;
-
-    // Optional: BYOK provider config
-    public ProviderOptions? Provider { get; set; }
-}
-
-public class ProviderOptions
-{
-    public string Type { get; set; } = "openai";
-    public string? BaseUrl { get; set; }
-    public string? ApiKey { get; set; }
 }
 ```
 
 Environment variable override (for secrets):
 ```bash
 export ClawPilot__TelegramBotToken="123456:ABC-DEF..."
-export ClawPilot__Provider__ApiKey="sk-..."
+export ClawPilot__OpenRouterApiKey="sk-or-v1-..."
 ```
 
 ---
 
-## 12. Skills Engine
+## 13. Skills Engine
 
 NanoClaw's skills engine is a sophisticated overlay system (900+ lines) that manages file merging, backups, rebasing, and conflict resolution for "skills" — bundles of CLAUDE.md instructions, MCP configs, and container customizations.
 
 ### Phase 1: Skip
 
-The skills engine is the most complex subsystem and is **not needed for initial launch**. The core loop (Telegram → Copilot → respond) works without it.
+The skills engine is the most complex subsystem and is **not needed for initial launch**. The core loop (Telegram → SK + OpenRouter → respond) works without it.
 
 ### Phase 2: Simplified Port
 
@@ -1254,8 +1425,8 @@ For ClawPilot, skills become simpler because there are no containers:
 
 | NanoClaw Skill Capability | ClawPilot Equivalent |
 |---|---|
-| Custom `CLAUDE.md` system prompts | Append to `SystemMessage.Content` |
-| MCP server configs (`.mcp.json`) | Add to `McpServers` dictionary |
+| Custom `CLAUDE.md` system prompts | Append to `ChatHistory` system message |
+| MCP server configs (`.mcp.json`) | Import as SK MCP plugins |
 | Container `Dockerfile` customizations | N/A — no containers |
 | File overlays with merge/rebase | Config file merging (simpler) |
 
@@ -1274,13 +1445,13 @@ A minimal skill in ClawPilot would be a JSON/YAML file:
       "tools": ["*"]
     }
   },
-  "tools": []
+  "plugins": []
 }
 ```
 
 ---
 
-## 13. Container Strategy
+## 14. Container Strategy
 
 ### Decision: Eliminate Containers
 
@@ -1288,9 +1459,9 @@ NanoClaw runs each agent invocation inside a Docker container for isolation. Thi
 
 ClawPilot **does not need containers** because:
 
-1. **Copilot SDK manages its own subprocess** — the `copilot` CLI is spawned and managed by CopilotClient. No need for Docker.
-2. **Tools are registered in-process** — custom tools run as C# delegates, not shell commands.
-3. **Security is handled by hooks** — PreToolUse can deny dangerous operations.
+1. **Semantic Kernel runs in-process** — LLM calls are HTTP requests to OpenRouter; no local subprocess or container needed.
+2. **Tools are registered in-process** — SK plugins run as C# delegates, not shell commands.
+3. **Security is handled by SK filters** — `IFunctionInvocationFilter` can deny dangerous operations.
 4. **MCP servers are sandboxed** — each MCP server runs as its own subprocess with defined capabilities.
 
 ### If Container Isolation Is Desired Later
@@ -1320,7 +1491,7 @@ McpServers = new Dictionary<string, object>
 
 ---
 
-## 14. Logging & Observability
+## 15. Logging & Observability
 
 NanoClaw uses `pino` with JSON output. ClawPilot uses Serilog.
 
@@ -1349,7 +1520,7 @@ builder.Host.UseSerilog();
 
 ---
 
-## 15. Testing Strategy
+## 16. Testing Strategy
 
 NanoClaw uses `vitest` with in-memory SQLite. ClawPilot uses **xUnit** with similar patterns.
 
@@ -1412,51 +1583,63 @@ public class DatabaseTests : IDisposable
 }
 ```
 
-### Example Test: CopilotSessionManager (Mocked)
+### Example Test: AgentOrchestrator (Mocked)
 
 ```csharp
 using Moq;
 using Xunit;
 
-public class CopilotSessionManagerTests
+public class AgentOrchestratorTests
 {
     [Fact]
-    public async Task GetOrCreateSession_ReturnsSameSession_ForSameConversation()
+    public void GetOrCreateHistory_ReturnsSameHistory_ForSameConversation()
     {
-        // Use test doubles — the real CopilotClient needs the CLI
-        var manager = CreateTestManager();
-        await manager.StartAsync();
+        var orchestrator = CreateTestOrchestrator();
 
-        var session1 = await manager.GetOrCreateSessionAsync("chat-1", "prompt");
-        var session2 = await manager.GetOrCreateSessionAsync("chat-1", "prompt");
+        var history1 = orchestrator.GetOrCreateHistory("chat-1", "prompt");
+        var history2 = orchestrator.GetOrCreateHistory("chat-1", "prompt");
 
-        Assert.Same(session1, session2);
+        Assert.Same(history1, history2);
     }
 
     [Fact]
-    public async Task GetOrCreateSession_CreatesDifferentSessions_ForDifferentConversations()
+    public void GetOrCreateHistory_CreatesDifferentHistories_ForDifferentConversations()
     {
-        var manager = CreateTestManager();
-        await manager.StartAsync();
+        var orchestrator = CreateTestOrchestrator();
 
-        var session1 = await manager.GetOrCreateSessionAsync("chat-1", "prompt");
-        var session2 = await manager.GetOrCreateSessionAsync("chat-2", "prompt");
+        var history1 = orchestrator.GetOrCreateHistory("chat-1", "prompt");
+        var history2 = orchestrator.GetOrCreateHistory("chat-2", "prompt");
 
-        Assert.NotSame(session1, session2);
+        Assert.NotSame(history1, history2);
+    }
+
+    [Fact]
+    public void ResetConversation_RemovesHistory()
+    {
+        var orchestrator = CreateTestOrchestrator();
+        orchestrator.GetOrCreateHistory("chat-1", "prompt");
+
+        orchestrator.ResetConversation("chat-1");
+
+        // Should create a new history after reset
+        var newHistory = orchestrator.GetOrCreateHistory("chat-1", "prompt");
+        Assert.Single(newHistory); // Only system message
     }
 }
 ```
 
 ---
 
-## 16. Deployment
+## 17. Deployment
 
 ### Program.cs (Full Entry Point)
 
 ```csharp
+using ClawPilot.AI;
+using ClawPilot.AI.Filters;
+using ClawPilot.AI.Plugins;
 using ClawPilot.Channels;
 using ClawPilot.Configuration;
-using ClawPilot.Copilot;
 using ClawPilot.Database;
 using ClawPilot.Services;
 using Microsoft.EntityFrameworkCore;
@@ -1490,9 +1673,8 @@ builder.Services.AddSingleton(
 
 // Services
 builder.Services.AddSingleton<ITelegramChannel, TelegramChannel>();
-builder.Services.AddSingleton<ToolRegistry>();
-builder.Services.AddSingleton<HookHandlers>();
-builder.Services.AddSingleton<CopilotSessionManager>();
+builder.Services.AddSingleton<MemoryService>();
+builder.Services.AddSingleton<AgentOrchestrator>();
 builder.Services.AddSingleton<GroupQueueService>();
 
 // Hosted services (background workers)
@@ -1507,10 +1689,6 @@ using (var scope = host.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<ClawPilotDbContext>();
     await db.Database.MigrateAsync();
 }
-
-// Start Copilot client
-var copilot = host.Services.GetRequiredService<CopilotSessionManager>();
-await copilot.StartAsync();
 
 await host.RunAsync();
 ```
@@ -1547,10 +1725,9 @@ public class TelegramHostedService : BackgroundService
 
 ### Prerequisites
 
-1. **`copilot` CLI** must be installed and in PATH (Copilot SDK communicates with it via JSON-RPC)
+1. **OpenRouter API key** from [openrouter.ai](https://openrouter.ai) (free tier available)
 2. **Telegram Bot Token** from @BotFather
 3. **.NET 8 SDK** installed
-4. (Optional) GitHub Copilot subscription for default model, or configure BYOK
 
 ### Running
 
@@ -1615,29 +1792,32 @@ WantedBy=multi-user.target
 
 ---
 
-## 17. Migration Checklist
+## 18. Migration Checklist
 
 ### Phase 1: Core Loop (MVP)
 
 - [ ] `dotnet new worker` project scaffold
-- [ ] Add NuGet packages (`Telegram.Bot`, `GitHub.Copilot.SDK`, `EF Core SQLite`, `Serilog`)
-- [ ] `ClawPilotOptions` configuration class
+- [ ] Add NuGet packages (`Telegram.Bot`, `Microsoft.SemanticKernel`, `SK.Connectors.OpenAI`, `EF Core SQLite`, `Serilog`)
+- [ ] `ClawPilotOptions` configuration class (with OpenRouter API key)
 - [ ] `ClawPilotDbContext` with `Conversation`, `Message` entities
 - [ ] EF Core initial migration
 - [ ] `TelegramChannel` — connect, receive messages, send responses
-- [ ] `CopilotSessionManager` — create client, create session, `SendAndWaitAsync`
-- [ ] `MessageProcessorService` — wire Telegram → DB → Copilot → DB → Telegram
+- [ ] `AgentOrchestrator` — SK Kernel with OpenRouter backend, `SendMessageAsync`
+- [ ] `MessageProcessorService` — wire Telegram → DB → SK+OpenRouter → DB → Telegram
 - [ ] `Program.cs` — DI setup, hosted services
 - [ ] Basic system prompt
-- [ ] End-to-end test: send Telegram message → get AI response
+- [ ] End-to-end test: send Telegram message → get AI response via OpenRouter
 
-### Phase 2: Tools & Hooks
+### Phase 2: Plugins, Filters & Memory
 
-- [ ] `ToolRegistry` — `send_message`, `get_current_datetime`, `search_messages`
-- [ ] `HookHandlers` — `OnPreToolUse` security filtering
-- [ ] `ScheduleTaskTool` + `TaskSchedulerService`
-- [ ] Session persistence (resume sessions after restart)
-- [ ] Error handling and graceful degradation
+- [ ] `MessagingPlugin` — `send_message`, `search_messages` (SK `[KernelFunction]`)
+- [ ] `SchedulerPlugin` + `UtilityPlugin` — `schedule_task`, `get_current_datetime`
+- [ ] `SecurityFilter` — `IFunctionInvocationFilter` for dangerous tool blocking
+- [ ] `MemoryService` — sqlite-vec vector memory for RAG
+- [ ] Add `Microsoft.SemanticKernel.Connectors.SqliteVec` package
+- [ ] Session persistence (restore `ChatHistory` from DB on restart)
+- [ ] `TaskSchedulerService` for scheduled tasks
+- [ ] Error handling (surface LLM errors to user) and graceful degradation
 
 ### Phase 3: Group Chat
 
@@ -1659,27 +1839,39 @@ WantedBy=multi-user.target
 ### Phase 5: Skills Engine (Optional)
 
 - [ ] Skill manifest format (JSON)
-- [ ] Skill loader (append system prompt, register MCP servers)
+- [ ] Skill loader (append system prompt, import MCP plugins into SK)
 - [ ] Skill install/uninstall commands
 - [ ] Skill marketplace or git-based distribution
 
 ---
 
-## 18. Open Questions & Risks
+## 19. Open Questions & Risks
 
-| # | Question | Risk | Mitigation |
-|---|---|---|---|
-| 1 | Does `copilot` CLI need a GitHub Copilot subscription? | Might limit user base | BYOK support — configure OpenAI/Anthropic directly |
-| 2 | Copilot SDK session persistence — how long do sessions survive? | May lose context on CLI restart | Store conversation summary in DB as fallback |
-| 3 | Telegram 4096 char limit — how to handle long agent responses? | Truncated or ugly split messages | Smart chunking at paragraph/code boundaries |
-| 4 | In-process agent (no container) — is isolation sufficient? | Custom tools run in host process | Only register safe tools; use MCP for untrusted code |
-| 5 | Copilot SDK is pre-1.0 — API stability? | Breaking changes | Pin version, abstract behind interfaces |
-| 6 | `copilot` CLI cold start latency? | First message slow | Pre-warm client at startup (`StartAsync`) |
-| 7 | Infinite sessions compaction — what gets dropped? | Important context lost | Periodically persist key facts to DB |
-| 8 | Concurrent sessions — CLI subprocess limits? | Resource exhaustion with many chats | Pool sessions, set max concurrent limit |
+| # | Question | Risk | Mitigation | Answer |
+|---|---|---|---|---|
+| 1 | OpenRouter rate limits and reliability? | Service outage blocks all LLM calls | ~~Implement retry with exponential backoff~~ — surface error to the user directly | **Decided**: Throw error to the user; no retry/fallback logic |
+| 2 | OpenRouter cost management across 200+ models? | Unexpected cost spikes if model is changed | Default to cost-efficient model (Claude Sonnet); ~~per-chat token budget tracking~~ not needed | **Decided**: Use cost-efficient model; no budget tracking |
+| 3 | Telegram 4096 char limit — how to handle long agent responses? | Truncated or ugly split messages | Smart chunking at paragraph/code boundaries | **Decided**: Smart chunking at paragraph/code boundaries |
+| 4 | In-process agent (no container) — is isolation sufficient? | SK plugins run in host process | Only register safe plugins; use MCP for untrusted code | **Decided**: Follow mitigation strategy |
+| 5 | SK's SqliteVec connector is "Preview" — stability? | Breaking changes in vector store API | Pin version, abstract behind `ISemanticTextMemory` interface | **Decided**: Follow mitigation strategy |
+| 6 | sqlite-vec native extension loading on different platforms? | May not work on all OS/architectures | Test on macOS (M-series), Linux (x64), provide fallback to keyword search | **Decided**: Follow mitigation strategy |
+| 7 | Chat history grows unbounded in memory? | OOM with many long conversations | Cap `ChatHistory` at N messages, rely on sqlite-vec RAG for older context | **Decided**: Follow mitigation strategy |
+| 8 | OpenRouter's function calling support varies by model? | Tool calls may fail on some models | Test primary models (Claude, GPT-4o); document which models support tools | **Decided**: Follow mitigation strategy |
+| 9 | Embedding model costs for vector memory? | Every message pair generates an embedding call | Use efficient model (`text-embedding-3-small`); batch embeddings; make memory opt-in | **Decided**: Use efficient embedding model and batching |
+| 10 | ~~Alternative: should we support Copilot SDK alongside SK?~~ | ~~Maintenance burden of two paths~~ | ~~Keep Copilot SDK as documented alternative~~ | **Decided**: No — SK + OpenRouter is the only supported path. All Copilot SDK references removed from the plan. |
 
 ---
 
 ## Summary
 
-ClawPilot is a simplification of NanoClaw. By switching from Claude Agent SDK (Docker containers + file IPC) to GitHub Copilot SDK (in-process + JSON-RPC), we eliminate ~40% of the codebase: container-runner, container-runtime, agent-runner, IPC layer, mount-security, and Dockerfile management. The Telegram channel is simpler than WhatsApp (official API, no QR auth). The result is a single .NET process with ~6 core files that handles the full message lifecycle end-to-end.
+ClawPilot is a simplification and enhancement of NanoClaw. By switching from Claude Agent SDK (Docker containers + file IPC) to **Semantic Kernel + OpenRouter** (in-process orchestration + HTTP API), we eliminate ~40% of the codebase: container-runner, container-runtime, agent-runner, IPC layer, mount-security, and Dockerfile management.
+
+Key improvements over the original plan (informed by deep research):
+- **OpenRouter** as the sole LLM provider — no CLI installation, no subscription required, access to 200+ models
+- **Semantic Kernel** provides a mature, Microsoft-backed orchestration layer with native function calling, prompt templates, and filters
+- **sqlite-vec vector memory** adds semantic retrieval (RAG) — a new capability NanoClaw entirely lacks
+- **SK plugins** replace NanoClaw's MCP stdio tools with idiomatic C# `[KernelFunction]` attributes
+- **Error handling**: LLM errors surface directly to the user (no retry/fallback complexity)
+- **Cost model**: default to cost-efficient model (Claude Sonnet), efficient embedding model with batching
+
+The Telegram channel remains simpler than WhatsApp (official API, no QR auth). The result is a single .NET process with ~8 core files that handles the full message lifecycle end-to-end, with the added bonus of long-term semantic memory.
