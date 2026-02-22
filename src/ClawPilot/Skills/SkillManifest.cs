@@ -13,6 +13,7 @@ public sealed class SkillManifest
 
 public sealed class McpServerConfig
 {
+    public string Type { get; set; } = "local";
     public string Command { get; set; } = string.Empty;
     public List<string> Args { get; set; } = [];
     public Dictionary<string, string> Env { get; set; } = new();

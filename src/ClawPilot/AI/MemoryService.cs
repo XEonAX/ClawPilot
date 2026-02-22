@@ -1,7 +1,12 @@
+using System.ClientModel;
 using ClawPilot.Configuration;
+using ClawPilot.Database.Entities;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.VectorData;
+using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Connectors.SqliteVec;
+using OpenAI;
 
 namespace ClawPilot.AI;
 
@@ -14,20 +19,56 @@ public class MemoryService : IAsyncDisposable
     private bool _initialized;
     private const string CollectionName = "conversations";
 
-    public MemoryService(ClawPilotOptions options, ILogger<MemoryService> logger, IEmbeddingGenerator<string, Embedding<float>>? embeddingService = null)
+    public MemoryService(IOptions<ClawPilotOptions> options, ILogger<MemoryService> logger)
     {
         _logger = logger;
-        _embeddingService = embeddingService;
+        var opts = options.Value;
 
         try
         {
-            _store = new SqliteVectorStore($"Data Source={options.DatabasePath}");
+            _store = new SqliteVectorStore($"Data Source={opts.DatabasePath}");
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to initialize SqliteVectorStore, memory features disabled");
             _store = null;
         }
+
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(opts.OpenRouterApiKey) && !string.IsNullOrWhiteSpace(opts.EmbeddingModel))
+            {
+                var openAiClient = new OpenAIClient(
+                    new ApiKeyCredential(opts.OpenRouterApiKey),
+                    new OpenAIClientOptions { Endpoint = new Uri(OpenRouterConfig.BaseUrl) });
+
+                var embKernelBuilder = Kernel.CreateBuilder();
+#pragma warning disable SKEXP0010 // Experimental embedding generator API
+                embKernelBuilder.AddOpenAIEmbeddingGenerator(
+                    modelId: opts.EmbeddingModel,
+                    openAIClient: openAiClient);
+#pragma warning restore SKEXP0010
+                var embKernel = embKernelBuilder.Build();
+                _embeddingService = embKernel.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>();
+            }
+            else
+            {
+                _logger.LogWarning("OpenRouter API key or embedding model not configured, memory features disabled");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to initialize embedding service, memory features disabled");
+            _embeddingService = null;
+        }
+    }
+
+    /// <summary>
+    /// Internal constructor for tests — allows running without a real embedding service.
+    /// </summary>
+    internal MemoryService(ClawPilotOptions options, ILogger<MemoryService> logger)
+        : this(Options.Create(options), logger)
+    {
     }
 
     private async Task EnsureInitializedAsync(CancellationToken ct)
@@ -102,19 +143,4 @@ public class MemoryService : IAsyncDisposable
     {
         return ValueTask.CompletedTask;
     }
-}
-
-public sealed class MemoryRecord
-{
-    [VectorStoreKey]
-    public string Key { get; set; } = string.Empty;
-
-    [VectorStoreData]
-    public string Text { get; set; } = string.Empty;
-
-    [VectorStoreData]
-    public string ConversationId { get; set; } = string.Empty;
-
-    [VectorStoreVector(1536)]
-    public ReadOnlyMemory<float> Embedding { get; set; }
 }

@@ -21,13 +21,14 @@ public class UtilityPlugin
     }
 
     [KernelFunction("recall_memory")]
-    [Description("Search conversation memory for relevant past context.")]
+    [Description("Search memory for relevant past context.")]
     public async Task<string> RecallMemoryAsync(
-        [Description("The conversation ID to search within")] string conversationId,
-        [Description("The query to search for relevant memories")] string query,
+        [Description("What to search for")] string query,
+        Kernel kernel,
         CancellationToken ct = default)
     {
-        var results = await _memory.RecallAsync(conversationId, query, limit: 5, ct);
+        // §4.2: Use global scope for recall — LLM doesn't need to track conversation IDs
+        var results = await _memory.RecallAsync("global", query, limit: 5, ct);
         return results.Count == 0
             ? "No relevant memories found."
             : string.Join("\n---\n", results);

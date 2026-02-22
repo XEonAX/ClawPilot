@@ -80,7 +80,8 @@ public class MessageProcessorServiceTests
 
         var prompt = processor.BuildSystemPrompt(conversation, message);
 
-        Assert.Equal("You are a helpful personal assistant.", prompt);
+        // §2.1: Uses global default when no config or conversation prompt
+        Assert.Contains("You are a helpful personal assistant.", prompt);
     }
 
     [Fact]
@@ -92,7 +93,10 @@ public class MessageProcessorServiceTests
 
         var prompt = processor.BuildSystemPrompt(conversation, message);
 
-        Assert.StartsWith("Be terse.", prompt);
+        // §2.1: Global prompt is base, conversation prompt is appended as additional context
+        Assert.Contains("You are a helpful personal assistant.", prompt);
+        Assert.Contains("Be terse.", prompt);
+        Assert.Contains("Additional context", prompt);
     }
 
     [Fact]

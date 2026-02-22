@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text.Json;
 using ClawPilot.Channels;
 using ClawPilot.Database;
 using Microsoft.EntityFrameworkCore;
@@ -42,11 +43,11 @@ public class MessagingPlugin
             .Where(m => EF.Functions.Like(m.Content, $"%{keyword}%"))
             .OrderByDescending(m => m.CreatedAt)
             .Take(limit)
-            .Select(m => $"[{m.Role}] {m.SenderName ?? "System"}: {m.Content}")
+            .Select(m => new { m.Role, Sender = m.SenderName ?? "System", m.Content, m.CreatedAt })
             .ToListAsync(ct);
 
         return results.Count == 0
             ? "No messages found."
-            : string.Join("\n", results);
+            : JsonSerializer.Serialize(results);
     }
 }

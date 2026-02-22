@@ -1,6 +1,6 @@
 # ClawPilot — Implementation Plan
 
-> **Fork of NanoClaw**: .NET 8+ rewrite using **Semantic Kernel + OpenRouter** (instead of Claude Agent SDK), **Telegram** (instead of WhatsApp), and **SQLite with vector memory** for persistence.
+> **Fork of NanoClaw**: .NET 9 rewrite using **Semantic Kernel + OpenRouter** (instead of Claude Agent SDK), **Telegram** (instead of WhatsApp), and **SQLite with vector memory** for persistence.
 
 ---
 
@@ -231,7 +231,7 @@ ClawPilot/
 <Project Sdk="Microsoft.NET.Sdk.Worker">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
@@ -250,16 +250,17 @@ ClawPilot/
     <PackageReference Include="Microsoft.SemanticKernel.Connectors.SqliteVec" Version="1.*-preview" />
 
     <!-- Database -->
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.*" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.*" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.*" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.*" />
 
     <!-- Logging -->
-    <PackageReference Include="Serilog.Extensions.Hosting" Version="8.*" />
+    <PackageReference Include="Serilog.Extensions.Hosting" Version="9.*" />
+    <PackageReference Include="Serilog.Settings.Configuration" Version="10.*" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.*" />
     <PackageReference Include="Serilog.Sinks.File" Version="6.*" />
 
     <!-- Configuration -->
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.*" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.*" />
 
     <!-- Optional: OpenRouter.NET for advanced OpenRouter features -->
     <!-- <PackageReference Include="OpenRouter.NET" Version="*" /> -->
@@ -368,6 +369,9 @@ public class TelegramChannel : ITelegramChannel
     private bool IsAllowed(Message message)
     {
         // NanoClaw equivalent: PHONE_ID / group JID filtering
+        // When AllowedChatIds is empty, allow all chats ("open mode" for development)
+        if (_options.AllowedChatIds.Count == 0)
+            return true;
         var chatId = message.Chat.Id.ToString();
         return _options.AllowedChatIds.Contains(chatId);
     }
@@ -670,6 +674,15 @@ public class ScheduledTask
     public DateTimeOffset? LastRunAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
+
+/// <summary>Persists skill enabled/disabled state across restarts.</summary>
+public class SkillState
+{
+    public int Id { get; set; }
+    public required string SkillName { get; set; }
+    public bool Enabled { get; set; } = true;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
 ```
 
 ### DbContext
@@ -684,6 +697,7 @@ public class ClawPilotDbContext : DbContext
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<Message> Messages => Set<Message>();
     public DbSet<ScheduledTask> ScheduledTasks => Set<ScheduledTask>();
+    public DbSet<SkillState> SkillStates => Set<SkillState>();
 
     public ClawPilotDbContext(DbContextOptions<ClawPilotDbContext> options)
         : base(options) { }
@@ -704,6 +718,11 @@ public class ClawPilotDbContext : DbContext
         modelBuilder.Entity<ScheduledTask>(e =>
         {
             e.HasIndex(t => t.ChatId);
+        });
+
+        modelBuilder.Entity<SkillState>(e =>
+        {
+            e.HasIndex(s => s.SkillName).IsUnique();
         });
     }
 }
@@ -1034,10 +1053,10 @@ public class MessagingPlugin
     [KernelFunction("send_message")]
     [Description("Send a message to a Telegram chat. Use this to proactively message the user.")]
     public async Task<string> SendMessageAsync(
-        [Description("The Telegram chat ID to send to")] string chatId,
+        [Description("The Telegram chat ID to send to")] long chatId,
         [Description("The message text")] string message)
     {
-        await _telegram.SendTextAsync(long.Parse(chatId), message);
+        await _telegram.SendTextAsync(chatId, message);
         return $"Message sent to {chatId}";
     }
 
@@ -1079,7 +1098,7 @@ public class SchedulerPlugin
     [KernelFunction("schedule_task")]
     [Description("Schedule a recurring task. Takes a description and cron expression.")]
     public async Task<string> ScheduleTaskAsync(
-        [Description("Chat ID to run task for")] string chatId,
+        [Description("Chat ID to run task for")] long chatId,
         [Description("What the task should do")] string description,
         [Description("Cron expression for scheduling")] string cronExpression)
     {
@@ -1088,7 +1107,7 @@ public class SchedulerPlugin
 
         db.ScheduledTasks.Add(new ScheduledTask
         {
-            ChatId = chatId,
+            ChatId = chatId.ToString(),
             Description = description,
             CronExpression = cronExpression,
         });
@@ -1727,7 +1746,7 @@ public class TelegramHostedService : BackgroundService
 
 1. **OpenRouter API key** from [openrouter.ai](https://openrouter.ai) (free tier available)
 2. **Telegram Bot Token** from @BotFather
-3. **.NET 8 SDK** installed
+3. **.NET 9 SDK** installed
 
 ### Running
 
@@ -1750,7 +1769,7 @@ WorkingDirectory=/opt/clawpilot
 Restart=always
 RestartSec=10
 Environment=DOTNET_ENVIRONMENT=Production
-Environment=ClawPilot__TelegramBotToken=<token>
+EnvironmentFile=-/opt/clawpilot/.env
 
 [Install]
 WantedBy=multi-user.target
@@ -1768,7 +1787,7 @@ WantedBy=multi-user.target
     <string>com.clawpilot</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/share/dotnet/dotnet</string>
+        <string>dotnet</string>
         <string>/opt/clawpilot/ClawPilot.dll</string>
     </array>
     <key>WorkingDirectory</key>
@@ -1778,9 +1797,9 @@ WantedBy=multi-user.target
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/tmp/clawpilot.stdout.log</string>
+    <string>/var/log/clawpilot/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/clawpilot.stderr.log</string>
+    <string>/var/log/clawpilot/stderr.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>DOTNET_ENVIRONMENT</key>
@@ -1808,7 +1827,7 @@ WantedBy=multi-user.target
 - [x] Create test project: `dotnet new xunit -n ClawPilot.Tests -o tests/ClawPilot.Tests`
 - [x] Add test project to solution: `dotnet sln add tests/ClawPilot.Tests/ClawPilot.Tests.csproj`
 - [x] Add project reference from tests → src
-- [x] Set `TargetFramework` to `net8.0`, enable `Nullable` and `ImplicitUsings` in csproj
+- [x] Set `TargetFramework` to `net9.0`, enable `Nullable` and `ImplicitUsings` in csproj
 - [x] Verify solution builds: `dotnet build`
 
 #### 1.2 NuGet Packages
@@ -1816,12 +1835,13 @@ WantedBy=multi-user.target
 - [x] Add `Telegram.Bot` v22.* to src project
 - [x] Add `Microsoft.SemanticKernel` v1.* to src project
 - [x] Add `Microsoft.SemanticKernel.Connectors.OpenAI` v1.* to src project
-- [x] Add `Microsoft.EntityFrameworkCore.Sqlite` v8.* to src project
-- [x] Add `Microsoft.EntityFrameworkCore.Design` v8.* to src project
-- [x] Add `Serilog.Extensions.Hosting` v8.* to src project
+- [x] Add `Microsoft.EntityFrameworkCore.Sqlite` v9.* to src project
+- [x] Add `Microsoft.EntityFrameworkCore.Design` v9.* to src project
+- [x] Add `Serilog.Extensions.Hosting` v9.* to src project
+- [x] Add `Serilog.Settings.Configuration` v10.* to src project
 - [x] Add `Serilog.Sinks.Console` v6.* to src project
 - [x] Add `Serilog.Sinks.File` v6.* to src project
-- [x] Add `Microsoft.Extensions.Hosting` v8.* to src project
+- [x] Add `Microsoft.Extensions.Hosting` v9.* to src project
 - [x] Add `Moq` and `Microsoft.EntityFrameworkCore.InMemory` to test project
 - [x] Verify all packages restore: `dotnet restore`
 

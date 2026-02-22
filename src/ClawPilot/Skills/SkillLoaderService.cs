@@ -1,10 +1,14 @@
 using System.Text.Json;
+using ClawPilot.Database;
+using ClawPilot.Database.Entities;
+using Microsoft.EntityFrameworkCore;
 
 namespace ClawPilot.Skills;
 
 public class SkillLoaderService
 {
     private readonly string _skillsDirectory;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<SkillLoaderService> _logger;
     private readonly List<SkillManifest> _loadedSkills = [];
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -13,9 +17,20 @@ public class SkillLoaderService
         ReadCommentHandling = JsonCommentHandling.Skip,
     };
 
-    public SkillLoaderService(string skillsDirectory, ILogger<SkillLoaderService> logger)
+    public SkillLoaderService(string skillsDirectory, IServiceScopeFactory scopeFactory, ILogger<SkillLoaderService> logger)
     {
         _skillsDirectory = skillsDirectory;
+        _scopeFactory = scopeFactory;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Internal constructor for tests — no DB persistence.
+    /// </summary>
+    internal SkillLoaderService(string skillsDirectory, ILogger<SkillLoaderService> logger)
+    {
+        _skillsDirectory = skillsDirectory;
+        _scopeFactory = null!;
         _logger = logger;
     }
 
@@ -52,6 +67,9 @@ public class SkillLoaderService
                 _logger.LogWarning(ex, "Failed to load skill from {File}", file);
             }
         }
+
+        // §3.8: Restore persisted enabled/disabled state from SQLite
+        RestoreSkillStates();
 
         _logger.LogInformation("Loaded {Count} skills from {Dir}", _loadedSkills.Count, _skillsDirectory);
     }
@@ -126,7 +144,72 @@ public class SkillLoaderService
             return false;
 
         skill.Enabled = enabled;
+
+        // §3.8: Persist enabled/disabled state to SQLite
+        PersistSkillState(name, enabled);
+
         _logger.LogInformation("Skill {Name} {State}", name, enabled ? "enabled" : "disabled");
         return true;
+    }
+
+    private void RestoreSkillStates()
+    {
+        if (_scopeFactory is null) return;
+
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ClawPilotDbContext>();
+            var states = db.SkillStates.ToList();
+
+            foreach (var state in states)
+            {
+                var skill = _loadedSkills.FirstOrDefault(s =>
+                    s.Name.Equals(state.SkillName, StringComparison.OrdinalIgnoreCase));
+                if (skill is not null)
+                {
+                    skill.Enabled = state.Enabled;
+                    _logger.LogDebug("Restored skill state: {Name} = {Enabled}", state.SkillName, state.Enabled);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to restore skill states from database");
+        }
+    }
+
+    private void PersistSkillState(string name, bool enabled)
+    {
+        if (_scopeFactory is null) return;
+
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<ClawPilotDbContext>();
+
+            var state = db.SkillStates
+                .FirstOrDefault(s => s.SkillName == name);
+
+            if (state is null)
+            {
+                db.SkillStates.Add(new SkillState
+                {
+                    SkillName = name,
+                    Enabled = enabled,
+                });
+            }
+            else
+            {
+                state.Enabled = enabled;
+                state.UpdatedAt = DateTimeOffset.UtcNow;
+            }
+
+            db.SaveChanges();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist skill state for {Name}", name);
+        }
     }
 }

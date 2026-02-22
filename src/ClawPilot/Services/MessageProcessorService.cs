@@ -90,6 +90,30 @@ public class MessageProcessorService : BackgroundService
             await db.SaveChangesAsync(ct);
 
             var systemPrompt = BuildSystemPrompt(conversation, message);
+
+            // §2.4: Restore session on first message after process restart
+            if (!_orchestrator.HasHistory(chatKey))
+            {
+                var recentMessages = await db.Messages
+                    .Where(m => m.ConversationId == conversation.Id)
+                    .OrderByDescending(m => m.CreatedAt)
+                    .Take(50)
+                    .OrderBy(m => m.CreatedAt)
+                    .Select(m => new { m.Role, m.Content })
+                    .ToListAsync(ct);
+
+                if (recentMessages.Count > 0)
+                {
+                    var pairs = recentMessages
+                        .Select(m => (m.Role, m.Content))
+                        .ToList();
+                    await _orchestrator.RestoreSessionAsync(chatKey, systemPrompt, pairs);
+                    _logger.LogInformation(
+                        "Restored {Count} messages for conversation {ChatId}",
+                        recentMessages.Count, chatKey);
+                }
+            }
+
             var response = await _orchestrator.SendMessageAsync(
                 chatKey, message.Text, systemPrompt, ct);
 
@@ -145,7 +169,11 @@ public class MessageProcessorService : BackgroundService
 
     internal string BuildSystemPrompt(Conversation conversation, IncomingMessage message)
     {
-        var prompt = conversation.SystemPrompt ?? "You are a helpful personal assistant.";
+        // §2.1: Start from the global config prompt, then append conversation-level override
+        var prompt = _options.SystemPrompt ?? "You are a helpful personal assistant.";
+
+        if (conversation.SystemPrompt is not null)
+            prompt += $"\n\nAdditional context:\n{conversation.SystemPrompt}";
 
         prompt = _skillLoader.AppendSkillPrompts(prompt);
 

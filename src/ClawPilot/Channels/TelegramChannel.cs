@@ -32,6 +32,7 @@ public class TelegramChannel : ITelegramChannel
         var receiverOptions = new ReceiverOptions
         {
             AllowedUpdates = [UpdateType.Message],
+            DropPendingUpdates = true,
         };
 
         _bot.StartReceiving(
@@ -118,6 +119,7 @@ public class TelegramChannel : ITelegramChannel
                 await _bot.SendMessage(
                     chatId: chatId,
                     text: chunk,
+                    parseMode: ParseMode.Markdown,
                     replyParameters: replyParams,
                     cancellationToken: ct);
 

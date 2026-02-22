@@ -128,4 +128,54 @@ public class IntegrationTests
 
         Assert.Equal(AuthorRole.System, history[0].Role);
     }
+
+    [Fact]
+    public async Task MemoryService_SaveAndRecall_GracefullyDegraded()
+    {
+        // §5: Without a real embedding service, Save/Recall should degrade gracefully
+        // (no-op when embedding service is unavailable — simulates the test environment)
+        var options = new ClawPilotOptions
+        {
+            TelegramBotToken = "test",
+            OpenRouterApiKey = "", // empty key → no embedding service
+        };
+        var memory = new MemoryService(options, NullLogger<MemoryService>.Instance);
+
+        // Save should not throw
+        await memory.SaveAsync("conv-1", "Hello", "Hi there!");
+
+        // Recall should return empty
+        var results = await memory.RecallAsync("conv-1", "Hello");
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public async Task MemoryService_RelevanceFilter_EmptyWhenNoService()
+    {
+        // §5: Relevance filtering — when no embedding service, results are empty
+        var options = new ClawPilotOptions
+        {
+            TelegramBotToken = "test",
+            OpenRouterApiKey = "",
+        };
+        var memory = new MemoryService(options, NullLogger<MemoryService>.Instance);
+
+        var results = await memory.RecallAsync("conv-1", "irrelevant query", limit: 5);
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public void AgentOrchestrator_HasHistory_TracksConversations()
+    {
+        // §5: HasHistory should return false before first message, true after
+        using var orchestrator = CreateTestOrchestrator();
+
+        Assert.False(orchestrator.HasHistory("new-conv"));
+
+        orchestrator.GetOrCreateHistory("new-conv", "system");
+        Assert.True(orchestrator.HasHistory("new-conv"));
+
+        orchestrator.ResetConversation("new-conv");
+        Assert.False(orchestrator.HasHistory("new-conv"));
+    }
 }

@@ -8,6 +8,7 @@ public class ClawPilotDbContext : DbContext
     public DbSet<Conversation> Conversations => Set<Conversation>();
     public DbSet<Message> Messages => Set<Message>();
     public DbSet<ScheduledTask> ScheduledTasks => Set<ScheduledTask>();
+    public DbSet<SkillState> SkillStates => Set<SkillState>();
 
     public ClawPilotDbContext(DbContextOptions<ClawPilotDbContext> options)
         : base(options) { }
@@ -28,6 +29,11 @@ public class ClawPilotDbContext : DbContext
         modelBuilder.Entity<ScheduledTask>(e =>
         {
             e.HasIndex(t => t.ChatId);
+        });
+
+        modelBuilder.Entity<SkillState>(e =>
+        {
+            e.HasIndex(s => s.SkillName).IsUnique();
         });
     }
 }

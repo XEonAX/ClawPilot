@@ -69,5 +69,24 @@ public class DatabaseTests : IDisposable
         Assert.Null(task.LastRunAt);
     }
 
+    [Fact]
+    public async Task ChatId_UniqueConstraint()
+    {
+        // §5: Verify duplicate ChatId throws on unique index
+        // Note: InMemory provider does not enforce unique indexes, so use SQLite in-memory
+        var options = new DbContextOptionsBuilder<ClawPilotDbContext>()
+            .UseSqlite("Data Source=:memory:")
+            .Options;
+        using var db = new ClawPilotDbContext(options);
+        await db.Database.OpenConnectionAsync();
+        await db.Database.EnsureCreatedAsync();
+
+        db.Conversations.Add(new Conversation { ChatId = "dupe-123" });
+        await db.SaveChangesAsync();
+
+        db.Conversations.Add(new Conversation { ChatId = "dupe-123" });
+        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+    }
+
     public void Dispose() => _db.Dispose();
 }
