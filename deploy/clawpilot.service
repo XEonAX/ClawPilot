@@ -1,0 +1,19 @@
+[Unit]
+Description=ClawPilot Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/dotnet /opt/clawpilot/publish/ClawPilot.dll
+WorkingDirectory=/opt/clawpilot
+Restart=always
+RestartSec=10
+Environment=DOTNET_ENVIRONMENT=Production
+EnvironmentFile=-/opt/clawpilot/.env
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=clawpilot
+
+[Install]
+WantedBy=multi-user.target
