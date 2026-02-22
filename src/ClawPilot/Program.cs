@@ -48,6 +48,9 @@ builder.Services.AddHostedService<MessageProcessorService>();
 builder.Services.AddHostedService<TaskSchedulerService>();
 builder.Services.AddHostedService<HealthCheckService>();
 
+// add httpclient for fetching web content in skills
+builder.Services.AddHttpClient();
+
 var host = builder.Build();
 
 using (var scope = host.Services.CreateScope())

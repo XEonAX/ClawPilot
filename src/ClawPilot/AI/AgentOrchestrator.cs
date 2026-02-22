@@ -32,6 +32,7 @@ public class AgentOrchestrator : IDisposable
         MemoryService memory,
         ITelegramChannel telegram,
         IServiceScopeFactory scopeFactory,
+        IHttpClientFactory httpClientFactory,
         SkillLoaderService skillLoader,
         ILoggerFactory loggerFactory)
     {
@@ -51,6 +52,7 @@ public class AgentOrchestrator : IDisposable
         kernelBuilder.Plugins.AddFromObject(new MessagingPlugin(telegram, scopeFactory, _options));
         kernelBuilder.Plugins.AddFromObject(new SchedulerPlugin(scopeFactory));
         kernelBuilder.Plugins.AddFromObject(new UtilityPlugin(memory));
+        kernelBuilder.Plugins.AddFromObject(new WebPlugin(scopeFactory, httpClientFactory));
 
         _kernel = kernelBuilder.Build();
         _kernel.FunctionInvocationFilters.Add(

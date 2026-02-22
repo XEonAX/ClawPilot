@@ -103,9 +103,22 @@ public class TelegramChannel : ITelegramChannel
         return _options.AllowedChatIds.Contains(chatId);
     }
 
+    private bool IsAllowedChatId(long chatId)
+    {
+        if (_options.AllowedChatIds.Count == 0)
+            return true;
+
+        return _options.AllowedChatIds.Contains(chatId.ToString());
+    }
+
     public async Task SendTextAsync(
         long chatId, string text, long? replyToMessageId = null, CancellationToken ct = default)
     {
+        if (!IsAllowedChatId(chatId))
+        {
+            _logger.LogDebug("Ignored message to unauthorized chat {ChatId}", chatId);
+            return;
+        }
         try
         {
             foreach (var chunk in ChunkText(text, _options.MaxResponseLength))
