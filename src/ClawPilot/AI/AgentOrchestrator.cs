@@ -48,7 +48,7 @@ public class AgentOrchestrator : IDisposable
             modelId: _options.Model,
             openAIClient: openAiClient);
 
-        kernelBuilder.Plugins.AddFromObject(new MessagingPlugin(telegram, scopeFactory));
+        kernelBuilder.Plugins.AddFromObject(new MessagingPlugin(telegram, scopeFactory, _options));
         kernelBuilder.Plugins.AddFromObject(new SchedulerPlugin(scopeFactory));
         kernelBuilder.Plugins.AddFromObject(new UtilityPlugin(memory));
 

@@ -28,7 +28,8 @@ public class PluginTests
     {
         var telegramMock = new Mock<ITelegramChannel>();
         var (scopeFactory, _) = CreateScopedDb();
-        var plugin = new MessagingPlugin(telegramMock.Object, scopeFactory);
+        var options = new ClawPilotOptions { TelegramBotToken = "test", OpenRouterApiKey = "test" };
+        var plugin = new MessagingPlugin(telegramMock.Object, scopeFactory, options);
 
         var result = await plugin.SendMessageAsync(123, "Hello!", CancellationToken.None);
 
@@ -53,7 +54,8 @@ public class PluginTests
             await db.SaveChangesAsync();
         }
 
-        var plugin = new MessagingPlugin(telegramMock.Object, scopeFactory);
+        var options = new ClawPilotOptions { TelegramBotToken = "test", OpenRouterApiKey = "test" };
+        var plugin = new MessagingPlugin(telegramMock.Object, scopeFactory, options);
         var result = await plugin.SearchMessagesAsync("hello", ct: CancellationToken.None);
 
         Assert.Contains("hello world", result);

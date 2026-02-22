@@ -9,7 +9,7 @@ public class ClawPilotOptions
     public HashSet<string> AllowedChatIds { get; set; } = [];
 
     public required string OpenRouterApiKey { get; set; }
-    public string Model { get; set; } = "anthropic/claude-sonnet-4-20250514";
+    public string Model { get; set; } = "z-ai/glm-5";
     public string EmbeddingModel { get; set; } = "openai/text-embedding-3-small";
 
     public string? SystemPrompt { get; set; }

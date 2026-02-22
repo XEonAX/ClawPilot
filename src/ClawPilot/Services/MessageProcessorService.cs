@@ -9,6 +9,7 @@ using ClawPilot.Database.Entities;
 using ClawPilot.Skills;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Microsoft.SemanticKernel;
 using Telegram.Bot.Exceptions;
 
 namespace ClawPilot.Services;
@@ -77,7 +78,7 @@ public class MessageProcessorService : BackgroundService
                 await db.SaveChangesAsync(ct);
             }
 
-            db.Messages.Add(new Message
+            var userMessage = new Message
             {
                 ConversationId = conversation.Id,
                 Role = "user",
@@ -86,7 +87,8 @@ public class MessageProcessorService : BackgroundService
                 SenderName = message.SenderName,
                 SenderId = message.SenderId,
                 Status = "processing",
-            });
+            };
+            db.Messages.Add(userMessage);
             await db.SaveChangesAsync(ct);
 
             var systemPrompt = BuildSystemPrompt(conversation, message);
@@ -95,10 +97,10 @@ public class MessageProcessorService : BackgroundService
             if (!_orchestrator.HasHistory(chatKey))
             {
                 var recentMessages = await db.Messages
-                    .Where(m => m.ConversationId == conversation.Id)
-                    .OrderByDescending(m => m.CreatedAt)
+                    .Where(m => m.ConversationId == conversation.Id && m.Status != "processing")
+                    .OrderByDescending(m => m.Id)
                     .Take(50)
-                    .OrderBy(m => m.CreatedAt)
+                    .OrderBy(m => m.Id)
                     .Select(m => new { m.Role, m.Content })
                     .ToListAsync(ct);
 
@@ -125,12 +127,20 @@ public class MessageProcessorService : BackgroundService
                 Status = "done",
             });
 
+            userMessage.Status = "done";
             conversation.UpdatedAt = DateTimeOffset.UtcNow;
             await db.SaveChangesAsync(ct);
 
             await _telegram.SendTextAsync(message.ChatId, response, message.MessageId, ct);
 
             _logger.LogDebug("Processed message {MessageId} for chat {ChatId}", message.MessageId, message.ChatId);
+        }
+        catch (HttpOperationException skEx)
+        {
+            _logger.LogError(skEx,
+                "LLM request failed for message {MessageId} in chat {ChatId} — Status: {StatusCode}, Response: {ResponseContent}",
+                message.MessageId, message.ChatId, skEx.StatusCode, skEx.ResponseContent);
+            await TrySendErrorAsync(message.ChatId, skEx, ct);
         }
         catch (HttpRequestException httpEx)
         {

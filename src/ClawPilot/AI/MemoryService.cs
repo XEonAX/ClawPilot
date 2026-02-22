@@ -17,7 +17,7 @@ public class MemoryService : IAsyncDisposable
     private readonly IEmbeddingGenerator<string, Embedding<float>>? _embeddingService;
     private VectorStoreCollection<string, MemoryRecord>? _collection;
     private bool _initialized;
-    private const string CollectionName = "conversations";
+    private const string CollectionName = "memory_records";
 
     public MemoryService(IOptions<ClawPilotOptions> options, ILogger<MemoryService> logger)
     {
