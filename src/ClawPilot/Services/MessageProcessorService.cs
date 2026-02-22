@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
 using System.Threading.Channels;
 using ClawPilot.AI;
@@ -63,77 +64,116 @@ public class MessageProcessorService : BackgroundService
         await semaphore.WaitAsync(ct);
         try
         {
-            await _telegram.SendTypingAsync(message.ChatId, ct);
+            var totalSw = Stopwatch.StartNew();
+            var stepSw = Stopwatch.StartNew();
 
-            using var scope = _scopeFactory.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<ClawPilotDbContext>();
+            // Start continuous typing indicator that runs until LLM response completes
+            using var typingCts = new CancellationTokenSource();
+            var typingTask = Task.Run(() => SendTypingContinuouslyAsync(message.ChatId, typingCts.Token, ct), ct);
 
-            var conversation = await db.Conversations
-                .FirstOrDefaultAsync(c => c.ChatId == chatKey, ct);
-
-            if (conversation is null)
+            try
             {
-                conversation = CreateConversation(message);
-                db.Conversations.Add(conversation);
-                await db.SaveChangesAsync(ct);
-            }
+                stepSw.Restart();
+                using var scope = _scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<ClawPilotDbContext>();
 
-            var userMessage = new Message
-            {
-                ConversationId = conversation.Id,
-                Role = "user",
-                Content = message.Text,
-                TelegramMessageId = message.MessageId,
-                SenderName = message.SenderName,
-                SenderId = message.SenderId,
-                Status = "processing",
-            };
-            db.Messages.Add(userMessage);
-            await db.SaveChangesAsync(ct);
+                var conversation = await db.Conversations
+                    .FirstOrDefaultAsync(c => c.ChatId == chatKey, ct);
 
-            var systemPrompt = BuildSystemPrompt(conversation, message);
-
-            // §2.4: Restore session on first message after process restart
-            if (!_orchestrator.HasHistory(chatKey))
-            {
-                var recentMessages = await db.Messages
-                    .Where(m => m.ConversationId == conversation.Id && m.Status != "processing")
-                    .OrderByDescending(m => m.Id)
-                    .Take(50)
-                    .OrderBy(m => m.Id)
-                    .Select(m => new { m.Role, m.Content })
-                    .ToListAsync(ct);
-
-                if (recentMessages.Count > 0)
+                if (conversation is null)
                 {
-                    var pairs = recentMessages
-                        .Select(m => (m.Role, m.Content))
-                        .ToList();
-                    await _orchestrator.RestoreSessionAsync(chatKey, systemPrompt, pairs);
-                    _logger.LogInformation(
-                        "Restored {Count} messages for conversation {ChatId}",
-                        recentMessages.Count, chatKey);
+                    conversation = CreateConversation(message);
+                    db.Conversations.Add(conversation);
+                    await db.SaveChangesAsync(ct);
                 }
+                _logger.LogDebug("[Timing] LoadOrCreateConversation took {Elapsed}ms for chat {ChatId}",
+                    stepSw.ElapsedMilliseconds, message.ChatId);
+
+                stepSw.Restart();
+                var userMessage = new Message
+                {
+                    ConversationId = conversation.Id,
+                    Role = "user",
+                    Content = message.Text,
+                    TelegramMessageId = message.MessageId,
+                    SenderName = message.SenderName,
+                    SenderId = message.SenderId,
+                    Status = "processing",
+                };
+                db.Messages.Add(userMessage);
+                await db.SaveChangesAsync(ct);
+                _logger.LogDebug("[Timing] SaveUserMessage took {Elapsed}ms for chat {ChatId}",
+                    stepSw.ElapsedMilliseconds, message.ChatId);
+
+                stepSw.Restart();
+                var systemPrompt = BuildSystemPrompt(conversation, message);
+                _logger.LogDebug("[Timing] BuildSystemPrompt took {Elapsed}ms for chat {ChatId}",
+                    stepSw.ElapsedMilliseconds, message.ChatId);
+
+                // §2.4: Restore session on first message after process restart
+                if (!_orchestrator.HasHistory(chatKey))
+                {
+                    stepSw.Restart();
+                    var recentMessages = await db.Messages
+                        .Where(m => m.ConversationId == conversation.Id && m.Status != "processing")
+                        .OrderByDescending(m => m.Id)
+                        .Take(50)
+                        .OrderBy(m => m.Id)
+                        .Select(m => new { m.Role, m.Content })
+                        .ToListAsync(ct);
+
+                    if (recentMessages.Count > 0)
+                    {
+                        var pairs = recentMessages
+                            .Select(m => (m.Role, m.Content))
+                            .ToList();
+                        await _orchestrator.RestoreSessionAsync(chatKey, systemPrompt, pairs);
+                        _logger.LogInformation(
+                            "Restored {Count} messages for conversation {ChatId}",
+                            recentMessages.Count, chatKey);
+                    }
+                    _logger.LogDebug("[Timing] RestoreSession took {Elapsed}ms for chat {ChatId}",
+                        stepSw.ElapsedMilliseconds, message.ChatId);
+                }
+
+                stepSw.Restart();
+                var response = await _orchestrator.SendMessageAsync(
+                    chatKey, message.Text, systemPrompt, ct);
+                _logger.LogDebug("[Timing] LLM SendMessage took {Elapsed}ms for chat {ChatId}",
+                    stepSw.ElapsedMilliseconds, message.ChatId);
+
+                stepSw.Restart();
+                db.Messages.Add(new Message
+                {
+                    ConversationId = conversation.Id,
+                    Role = "assistant",
+                    Content = response,
+                    Status = "done",
+                });
+
+                userMessage.Status = "done";
+                conversation.UpdatedAt = DateTimeOffset.UtcNow;
+                await db.SaveChangesAsync(ct);
+                _logger.LogDebug("[Timing] SaveAssistantMessage took {Elapsed}ms for chat {ChatId}",
+                    stepSw.ElapsedMilliseconds, message.ChatId);
+
+                stepSw.Restart();
+                await _telegram.SendTextAsync(message.ChatId, response, message.MessageId, ct);
+                _logger.LogDebug("[Timing] SendResponse took {Elapsed}ms for chat {ChatId}",
+                    stepSw.ElapsedMilliseconds, message.ChatId);
+
+                totalSw.Stop();
+                _logger.LogDebug("[Timing] Total processing took {Elapsed}ms for message {MessageId} in chat {ChatId}",
+                    totalSw.ElapsedMilliseconds, message.MessageId, message.ChatId);
+                    
+            }
+            finally
+            {
+                // Stop the typing indicator loop
+                typingCts.Cancel();
+                try { await typingTask; } catch (OperationCanceledException) { }
             }
 
-            var response = await _orchestrator.SendMessageAsync(
-                chatKey, message.Text, systemPrompt, ct);
-
-            db.Messages.Add(new Message
-            {
-                ConversationId = conversation.Id,
-                Role = "assistant",
-                Content = response,
-                Status = "done",
-            });
-
-            userMessage.Status = "done";
-            conversation.UpdatedAt = DateTimeOffset.UtcNow;
-            await db.SaveChangesAsync(ct);
-
-            await _telegram.SendTextAsync(message.ChatId, response, message.MessageId, ct);
-
-            _logger.LogDebug("Processed message {MessageId} for chat {ChatId}", message.MessageId, message.ChatId);
         }
         catch (HttpOperationException skEx)
         {
@@ -187,9 +227,12 @@ public class MessageProcessorService : BackgroundService
 
         prompt = _skillLoader.AppendSkillPrompts(prompt);
 
+        // Always include the chat ID so the AI can use it for tool calls
+        prompt += $"\n\nCurrent chat ID: {message.ChatId}";
+
         if (message.IsGroup)
         {
-            prompt += $"\n\nYou are in a group chat called \"{message.GroupName ?? "Unknown"}\".";
+            prompt += $"\nYou are in a group chat called \"{message.GroupName ?? "Unknown"}\".";
             prompt += $"\nThe current speaker is {message.SenderName}.";
             prompt += "\nOnly respond when directly addressed.";
         }
@@ -205,6 +248,44 @@ public class MessageProcessorService : BackgroundService
             DisplayName = message.IsGroup ? message.GroupName : message.SenderName,
             IsGroup = message.IsGroup,
         };
+    }
+
+    private async Task SendTypingContinuouslyAsync(long chatId, CancellationToken typingCt, CancellationToken overallCt)
+    {
+        // Telegram typing indicator lasts ~5 seconds, so we send it every 4 seconds to keep it active
+        const int typingIntervalMs = 4000;
+
+        try
+        {
+            while (!typingCt.IsCancellationRequested && !overallCt.IsCancellationRequested)
+            {
+                try
+                {
+                    await _telegram.SendTypingAsync(chatId, overallCt);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to send typing indicator to chat {ChatId}", chatId);
+                }
+
+                try
+                {
+                    await Task.Delay(typingIntervalMs, typingCt);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected when processing completes
+        }
     }
 
     private async Task TrySendErrorAsync(long chatId, Exception ex, CancellationToken ct)

@@ -15,9 +15,9 @@ public class SchedulerPlugin
     }
 
     [KernelFunction("schedule_task")]
-    [Description("Schedule a recurring task with a cron expression for a specific chat.")]
+    [Description("Schedule a recurring task with a cron expression for a specific chat. Use the chat ID from the current conversation context.")]
     public async Task<string> ScheduleTaskAsync(
-        [Description("The numeric Telegram chat ID")] long chatId,
+        [Description("The numeric Telegram chat ID from the current conversation context")] long chatId,
         [Description("A human-readable description of the task")] string description,
         [Description("A cron expression (e.g. '0 9 * * *' for daily at 9:00 UTC)")] string cronExpression,
         CancellationToken ct = default)
