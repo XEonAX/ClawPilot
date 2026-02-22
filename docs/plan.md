@@ -23,7 +23,7 @@
 15. [Logging & Observability](#15-logging--observability)
 16. [Testing Strategy](#16-testing-strategy)
 17. [Deployment](#17-deployment)
-18. [Migration Checklist](#18-migration-checklist)
+18. [Detailed Implementation Todo List](#18-detailed-implementation-todo-list)
 19. [Open Questions & Risks](#19-open-questions--risks)
 
 ---
@@ -1792,56 +1792,569 @@ WantedBy=multi-user.target
 
 ---
 
-## 18. Migration Checklist
+## 18. Detailed Implementation Todo List
 
-### Phase 1: Core Loop (MVP)
+> Each task maps to a specific file or class from the plan. Complete in order — later phases depend on earlier ones.
 
-- [ ] `dotnet new worker` project scaffold
-- [ ] Add NuGet packages (`Telegram.Bot`, `Microsoft.SemanticKernel`, `SK.Connectors.OpenAI`, `EF Core SQLite`, `Serilog`)
-- [ ] `ClawPilotOptions` configuration class (with OpenRouter API key)
-- [ ] `ClawPilotDbContext` with `Conversation`, `Message` entities
-- [ ] EF Core initial migration
-- [ ] `TelegramChannel` — connect, receive messages, send responses
-- [ ] `AgentOrchestrator` — SK Kernel with OpenRouter backend, `SendMessageAsync`
-- [ ] `MessageProcessorService` — wire Telegram → DB → SK+OpenRouter → DB → Telegram
-- [ ] `Program.cs` — DI setup, hosted services
-- [ ] Basic system prompt
-- [ ] End-to-end test: send Telegram message → get AI response via OpenRouter
+---
 
-### Phase 2: Plugins, Filters & Memory
+### Phase 1: Project Scaffold & Configuration
 
-- [ ] `MessagingPlugin` — `send_message`, `search_messages` (SK `[KernelFunction]`)
-- [ ] `SchedulerPlugin` + `UtilityPlugin` — `schedule_task`, `get_current_datetime`
-- [ ] `SecurityFilter` — `IFunctionInvocationFilter` for dangerous tool blocking
-- [ ] `MemoryService` — sqlite-vec vector memory for RAG
-- [ ] Add `Microsoft.SemanticKernel.Connectors.SqliteVec` package
-- [ ] Session persistence (restore `ChatHistory` from DB on restart)
-- [ ] `TaskSchedulerService` for scheduled tasks
-- [ ] Error handling (surface LLM errors to user) and graceful degradation
+#### 1.1 Solution & Project Setup
 
-### Phase 3: Group Chat
+- [ ] Create solution: `dotnet new sln -n ClawPilot`
+- [ ] Create worker project: `dotnet new worker -n ClawPilot -o src/ClawPilot`
+- [ ] Add project to solution: `dotnet sln add src/ClawPilot/ClawPilot.csproj`
+- [ ] Create test project: `dotnet new xunit -n ClawPilot.Tests -o tests/ClawPilot.Tests`
+- [ ] Add test project to solution: `dotnet sln add tests/ClawPilot.Tests/ClawPilot.Tests.csproj`
+- [ ] Add project reference from tests → src
+- [ ] Set `TargetFramework` to `net8.0`, enable `Nullable` and `ImplicitUsings` in csproj
+- [ ] Verify solution builds: `dotnet build`
 
-- [ ] `GroupQueueService` — serialize per-group processing
-- [ ] `ShouldRespondInGroup()` — @mention and reply detection
-- [ ] Group-specific system prompt injection
-- [ ] Per-conversation session management
+#### 1.2 NuGet Packages
 
-### Phase 4: Polish & Production
+- [ ] Add `Telegram.Bot` v22.* to src project
+- [ ] Add `Microsoft.SemanticKernel` v1.* to src project
+- [ ] Add `Microsoft.SemanticKernel.Connectors.OpenAI` v1.* to src project
+- [ ] Add `Microsoft.EntityFrameworkCore.Sqlite` v8.* to src project
+- [ ] Add `Microsoft.EntityFrameworkCore.Design` v8.* to src project
+- [ ] Add `Serilog.Extensions.Hosting` v8.* to src project
+- [ ] Add `Serilog.Sinks.Console` v6.* to src project
+- [ ] Add `Serilog.Sinks.File` v6.* to src project
+- [ ] Add `Microsoft.Extensions.Hosting` v8.* to src project
+- [ ] Add `Moq` and `Microsoft.EntityFrameworkCore.InMemory` to test project
+- [ ] Verify all packages restore: `dotnet restore`
 
-- [ ] Structured logging with Serilog
-- [ ] Health checks
-- [ ] Graceful shutdown (`IHostApplicationLifetime`)
-- [ ] Message chunking for long responses (4096 char limit)
-- [ ] Rate limiting (Telegram API limits)
-- [ ] Deployment scripts (systemd / launchd)
-- [ ] Unit and integration tests
+#### 1.3 Configuration
 
-### Phase 5: Skills Engine (Optional)
+- [ ] Create `src/ClawPilot/Configuration/` directory
+- [ ] Create `ClawPilotOptions.cs` — strongly-typed config class (section 12)
+  - [ ] `TelegramBotToken` (required)
+  - [ ] `BotUsername` (default `@ClawPilotBot`)
+  - [ ] `AllowedChatIds` (HashSet\<string\>)
+  - [ ] `OpenRouterApiKey` (required)
+  - [ ] `Model` (default `anthropic/claude-sonnet-4-20250514`)
+  - [ ] `EmbeddingModel` (default `openai/text-embedding-3-small`)
+  - [ ] `SystemPrompt` (nullable)
+  - [ ] `DatabasePath` (default `clawpilot.db`)
+  - [ ] `MaxResponseTokens` (default 4096)
+  - [ ] `MaxResponseLength` (default 4096)
+  - [ ] `SessionTimeoutMinutes` (default 60)
+- [ ] Create `appsettings.json` with `ClawPilot` section and `Serilog` section (section 12)
+- [ ] Create `appsettings.Development.json` with development overrides
+- [ ] Wire `IOptions<ClawPilotOptions>` binding in DI (to be done in Program.cs later)
 
-- [ ] Skill manifest format (JSON)
-- [ ] Skill loader (append system prompt, import MCP plugins into SK)
-- [ ] Skill install/uninstall commands
-- [ ] Skill marketplace or git-based distribution
+#### 1.4 Logging Setup
+
+- [ ] Create `src/ClawPilot/Logging/` directory
+- [ ] Create `SerilogConfig.cs` — helper for Serilog configuration (section 15)
+- [ ] Configure Serilog: `ReadFrom.Configuration`, `Enrich.FromLogContext`, `Enrich.WithProperty("Application", "ClawPilot")`
+- [ ] Configure console + rolling file sinks
+
+---
+
+### Phase 2: Database Layer
+
+#### 2.1 Entity Classes
+
+- [ ] Create `src/ClawPilot/Database/` directory
+- [ ] Create `src/ClawPilot/Database/Entities/` directory
+- [ ] Create `Conversation.cs` entity (section 7)
+  - [ ] `Id`, `ChatId`, `DisplayName`, `IsGroup`, `SessionId`, `SystemPrompt`, `CreatedAt`, `UpdatedAt`
+  - [ ] Navigation: `ICollection<Message> Messages`
+- [ ] Create `Message.cs` entity (section 7)
+  - [ ] `Id`, `ConversationId`, `Conversation` (nav), `Role`, `Content`, `TelegramMessageId`, `SenderName`, `SenderId`, `Status`, `CreatedAt`
+- [ ] Create `ScheduledTask.cs` entity (section 7)
+  - [ ] `Id`, `ChatId`, `Description`, `CronExpression`, `IsActive`, `LastRunAt`, `CreatedAt`
+
+#### 2.2 DbContext & Migrations
+
+- [ ] Create `ClawPilotDbContext.cs` (section 7)
+  - [ ] `DbSet<Conversation>`, `DbSet<Message>`, `DbSet<ScheduledTask>`
+  - [ ] `OnModelCreating`: unique index on `Conversation.ChatId`
+  - [ ] `OnModelCreating`: composite index on `Message.(ConversationId, Status)`
+  - [ ] `OnModelCreating`: index on `Message.CreatedAt`
+  - [ ] `OnModelCreating`: index on `ScheduledTask.ChatId`
+- [ ] Install `dotnet-ef` tool if not present
+- [ ] Create initial EF Core migration: `dotnet ef migrations add InitialCreate`
+- [ ] Verify migration compiles and applies: `dotnet ef database update`
+
+#### 2.3 Database Tests
+
+- [ ] Create `tests/ClawPilot.Tests/DatabaseTests.cs` (section 16)
+  - [ ] Test: `CreateConversation_SetsDefaults` — verify ChatId, IsGroup, CreatedAt
+  - [ ] Test: `Messages_LinkedToConversation` — verify message FK and retrieval
+  - [ ] Test: `ChatId_UniqueConstraint` — verify duplicate ChatId throws
+  - [ ] Test: `ScheduledTask_Persistence` — verify CRUD for scheduled tasks
+
+---
+
+### Phase 3: Telegram Channel Layer
+
+#### 3.1 Interface & Types
+
+- [ ] Create `src/ClawPilot/Channels/` directory
+- [ ] Create `ITelegramChannel.cs` interface (section 5)
+  - [ ] `StartAsync(CancellationToken)`
+  - [ ] `SendTextAsync(long chatId, string text, long? replyToMessageId, CancellationToken)`
+  - [ ] `SendTypingAsync(long chatId, CancellationToken)`
+  - [ ] `event Func<IncomingMessage, Task> OnMessage`
+- [ ] Create `IncomingMessage` record (section 5)
+  - [ ] `ChatId`, `MessageId`, `Text`, `SenderName`, `SenderId`, `IsGroup`, `GroupName`, `Timestamp`
+
+#### 3.2 TelegramChannel Implementation
+
+- [ ] Create `TelegramChannel.cs` (section 5)
+  - [ ] Constructor: inject `IOptions<ClawPilotOptions>`, `ILogger<TelegramChannel>`; create `TelegramBotClient`
+  - [ ] `StartAsync`: configure `ReceiverOptions`, start polling with `StartReceiving`
+  - [ ] `HandleUpdateAsync`: extract text messages, build `IncomingMessage`, fire `OnMessage`
+  - [ ] `IsAllowed`: filter by `AllowedChatIds` config
+  - [ ] `SendTextAsync`: send with reply-to support; implement `ChunkText` for 4096 char limit
+  - [ ] `SendTypingAsync`: send `ChatAction.Typing`
+  - [ ] `HandleErrorAsync`: log polling errors
+  - [ ] Static helper: `ChunkText(string text, int maxLen)` — split at paragraph/code boundaries
+
+#### 3.3 TelegramHostedService
+
+- [ ] Create `src/ClawPilot/Services/` directory
+- [ ] Create `TelegramHostedService.cs` (section 17)
+  - [ ] Inject `ITelegramChannel` and `Channel<IncomingMessage>`
+  - [ ] Wire `OnMessage` event → `Channel.Writer.WriteAsync`
+  - [ ] `ExecuteAsync`: call `StartAsync`, then `Task.Delay(Timeout.Infinite)`
+
+#### 3.4 Telegram Tests
+
+- [ ] Create `tests/ClawPilot.Tests/TelegramChannelTests.cs` (section 16)
+  - [ ] Test: `ChunkText_SplitsLongMessages` — verify correct chunking
+  - [ ] Test: `IsAllowed_FiltersUnauthorizedChats`
+  - [ ] Test: `IncomingMessage_RecordEquality`
+
+---
+
+### Phase 4: LLM Integration (Semantic Kernel + OpenRouter)
+
+#### 4.1 AgentOrchestrator — Core
+
+- [ ] Create `src/ClawPilot/AI/` directory
+- [ ] Create `AgentOrchestrator.cs` (section 6)
+  - [ ] Constructor: inject `MemoryService`, `IOptions<ClawPilotOptions>`, `ILogger<AgentOrchestrator>`
+  - [ ] Build SK `Kernel` with `AddOpenAIChatCompletion` pointing at `https://openrouter.ai/api/v1`
+  - [ ] Configure model from `ClawPilotOptions.Model`
+  - [ ] Get `IChatCompletionService` from kernel
+  - [ ] `ConcurrentDictionary<string, ChatHistory>` for per-conversation histories
+  - [ ] `GetOrCreateHistory(conversationId, systemPrompt)` — create with system message
+  - [ ] `ResetConversation(conversationId)` — remove history
+  - [ ] `Dispose()` — clear all histories
+
+#### 4.2 AgentOrchestrator — SendMessageAsync
+
+- [ ] Implement `SendMessageAsync(conversationId, userMessage, systemPrompt, ct)` (section 6)
+  - [ ] Call `GetOrCreateHistory`
+  - [ ] Add user message to history
+  - [ ] Configure `OpenAIPromptExecutionSettings` with `FunctionChoiceBehavior.Auto()` and `MaxTokens`
+  - [ ] Call `_chatService.GetChatMessageContentAsync(history, settings, _kernel, ct)`
+  - [ ] Add assistant message to history
+  - [ ] Return response content (or `"[No response]"` if null)
+
+> **Note**: RAG injection via `MemoryService.RecallAsync` and `MemoryService.SaveAsync` are wired in Phase 5 (Vector Memory). For now, `SendMessageAsync` works without memory.
+
+#### 4.3 OpenRouter Connectivity Test
+
+- [ ] Create `tests/ClawPilot.Tests/AgentOrchestratorTests.cs` (section 16)
+  - [ ] Test: `GetOrCreateHistory_ReturnsSameHistory_ForSameConversation`
+  - [ ] Test: `GetOrCreateHistory_CreatesDifferentHistories_ForDifferentConversations`
+  - [ ] Test: `ResetConversation_RemovesHistory`
+- [ ] Manual smoke test: create orchestrator with real OpenRouter key, send one message, verify response
+
+---
+
+### Phase 5: Vector Memory (sqlite-vec)
+
+#### 5.1 NuGet Package
+
+- [ ] Add `Microsoft.SemanticKernel.Connectors.SqliteVec` v1.*-preview to src project
+- [ ] Verify sqlite-vec native extension loads on macOS (M-series)
+
+#### 5.2 MemoryService Implementation
+
+- [ ] Create `MemoryService.cs` in `src/ClawPilot/AI/` (section 7)
+  - [ ] Constructor: accept `ClawPilotOptions`, build `MemoryBuilder`
+  - [ ] Configure `WithSqliteVecMemoryStore(options.DatabasePath)`
+  - [ ] Configure `WithOpenAITextEmbeddingGeneration` pointing at OpenRouter (`text-embedding-3-small`)
+  - [ ] Build `ISemanticTextMemory`
+  - [ ] `SaveAsync(conversationId, userMessage, assistantResponse, ct)` — store exchange as embedding
+  - [ ] `RecallAsync(conversationId, query, limit, ct)` — semantic search with `minRelevanceScore: 0.7`
+  - [ ] Implement `IAsyncDisposable`
+
+#### 5.3 Wire Memory into AgentOrchestrator
+
+- [ ] Update `AgentOrchestrator.SendMessageAsync` to call `_memory.RecallAsync` before LLM call (RAG injection)
+- [ ] Update `AgentOrchestrator.SendMessageAsync` to call `_memory.SaveAsync` after LLM response
+- [ ] Inject relevant memories as system message: `"Relevant context from memory:\n..."`
+
+#### 5.4 Memory Tests
+
+- [ ] Test: `MemoryService_SaveAndRecall` — save an exchange, recall it by query
+- [ ] Test: `MemoryService_RelevanceFilter` — verify low-relevance results are filtered
+- [ ] Test: `AgentOrchestrator_InjectsMemoryContext` — verify RAG context appears in history
+
+---
+
+### Phase 6: Message Processing Pipeline
+
+#### 6.1 MessageProcessorService
+
+- [ ] Create `MessageProcessorService.cs` in `src/ClawPilot/Services/` (section 8)
+  - [ ] Inject `Channel<IncomingMessage>`, `AgentOrchestrator`, `ITelegramChannel`, `IServiceScopeFactory`, `IOptions<ClawPilotOptions>`, `ILogger`
+  - [ ] `ConcurrentDictionary<string, SemaphoreSlim>` for per-chat locks
+  - [ ] `ExecuteAsync`: read from channel, dispatch `ProcessMessageAsync` per message
+
+#### 6.2 ProcessMessageAsync
+
+- [ ] Implement `ProcessMessageAsync(message, ct)` (section 8)
+  - [ ] Acquire per-chat semaphore
+  - [ ] Send typing indicator via `ITelegramChannel.SendTypingAsync`
+  - [ ] Create DI scope, get `ClawPilotDbContext`
+  - [ ] Find or create `Conversation` entity
+  - [ ] Persist incoming message as `Message` entity (role=user, status=processing)
+  - [ ] Call `BuildSystemPrompt` (base prompt + group context + conversation override)
+  - [ ] Call `AgentOrchestrator.SendMessageAsync`
+  - [ ] Persist assistant response as `Message` entity (role=assistant, status=done)
+  - [ ] Update `Conversation.UpdatedAt`
+  - [ ] Send response to Telegram via `ITelegramChannel.SendTextAsync`
+  - [ ] Catch exceptions: log error, send "⚠️ Sorry, something went wrong." to user
+  - [ ] Release semaphore in `finally`
+
+#### 6.3 BuildSystemPrompt
+
+- [ ] Implement `BuildSystemPrompt(conversation, message)` (section 8)
+  - [ ] Start with `ClawPilotOptions.SystemPrompt` (or default "You are a helpful personal assistant.")
+  - [ ] If group chat: append group name, sender name, "only respond when directly addressed" rule
+  - [ ] If `Conversation.SystemPrompt` override exists: append additional context
+
+#### 6.4 CreateConversation Helper
+
+- [ ] Implement `CreateConversation(db, message)` (section 8)
+  - [ ] Populate `ChatId`, `DisplayName`, `IsGroup` from `IncomingMessage`
+
+---
+
+### Phase 7: Program.cs — Full DI Wiring
+
+#### 7.1 Entry Point
+
+- [ ] Rewrite `Program.cs` with full DI setup (section 17)
+  - [ ] Configure Serilog from `builder.Configuration`
+  - [ ] Bind `ClawPilotOptions` from config section
+  - [ ] Register `ClawPilotDbContext` with SQLite connection string from `config.DatabasePath`
+  - [ ] Register `Channel<IncomingMessage>` (unbounded, single reader)
+  - [ ] Register `ITelegramChannel` → `TelegramChannel` (singleton)
+  - [ ] Register `MemoryService` (singleton)
+  - [ ] Register `AgentOrchestrator` (singleton)
+  - [ ] Register `GroupQueueService` (singleton) — placeholder for Phase 8
+  - [ ] Register `MessageProcessorService` as hosted service
+  - [ ] Register `TelegramHostedService` as hosted service
+  - [ ] On startup: create scope, run `db.Database.MigrateAsync()`
+  - [ ] Call `host.RunAsync()`
+
+#### 7.2 End-to-End Smoke Test
+
+- [ ] Set `ClawPilot__TelegramBotToken` and `ClawPilot__OpenRouterApiKey` env vars
+- [ ] Run `dotnet run` from `src/ClawPilot/`
+- [ ] Send a message to the Telegram bot
+- [ ] Verify: bot receives message → calls OpenRouter → sends response back
+- [ ] Verify: `Conversation` and `Message` rows created in SQLite DB
+- [ ] Verify: Serilog logs appear in console and `logs/` directory
+
+---
+
+### Phase 8: Group Chat Support
+
+#### 8.1 GroupQueueService
+
+- [ ] Create `GroupQueueService.cs` in `src/ClawPilot/Services/` (section 11)
+  - [ ] `ConcurrentDictionary<string, Channel<Func<Task>>>` for per-group work queues
+  - [ ] `ConcurrentDictionary<string, Task>` for per-group processor tasks
+  - [ ] `EnqueueAsync(groupId, work)` — add work to group's channel; start processor if needed
+  - [ ] `ProcessQueueAsync(groupId, channel)` — sequentially execute queued work items
+
+#### 8.2 Group Message Handling
+
+- [ ] Add `ShouldRespondInGroup(Message)` to `TelegramChannel` (section 11)
+  - [ ] Always respond in private chats
+  - [ ] Respond if `@BotUsername` is mentioned in message entities
+  - [ ] Respond if message is a reply to one of the bot's own messages
+  - [ ] Otherwise ignore
+- [ ] Update `HandleUpdateAsync` to call `ShouldRespondInGroup` before firing `OnMessage`
+
+#### 8.3 Group-Specific System Prompt
+
+- [ ] Update `BuildSystemPrompt` to include group context: group name, sender name, response rules
+
+#### 8.4 Per-Conversation Session Management
+
+- [ ] Implement `RestoreSessionAsync(conversationId, db)` in `AgentOrchestrator` (section 8)
+  - [ ] Load last 50 messages from DB, ordered by `CreatedAt`
+  - [ ] Rebuild `ChatHistory` from stored messages
+- [ ] Call `RestoreSessionAsync` on first message to a conversation after process restart
+
+#### 8.5 Group Chat Tests
+
+- [ ] Create `tests/ClawPilot.Tests/GroupQueueTests.cs` (section 16)
+  - [ ] Test: `EnqueueAsync_SerializesWithinGroup` — verify sequential execution per group
+  - [ ] Test: `EnqueueAsync_ParallelAcrossGroups` — verify different groups run concurrently
+  - [ ] Test: `ShouldRespondInGroup_MentionDetection`
+  - [ ] Test: `ShouldRespondInGroup_ReplyDetection`
+
+---
+
+### Phase 9: SK Plugins (Tool System)
+
+#### 9.1 MessagingPlugin
+
+- [ ] Create `src/ClawPilot/AI/Plugins/` directory
+- [ ] Create `MessagingPlugin.cs` (section 9)
+  - [ ] `[KernelFunction("send_message")]` — send text to a Telegram chat
+  - [ ] `[KernelFunction("search_messages")]` — keyword search on `Message` table via EF `Like`
+
+#### 9.2 SchedulerPlugin
+
+- [ ] Create `SchedulerPlugin.cs` (section 9)
+  - [ ] `[KernelFunction("schedule_task")]` — insert `ScheduledTask` entity
+
+#### 9.3 UtilityPlugin
+
+- [ ] Create `UtilityPlugin.cs` (section 9)
+  - [ ] `[KernelFunction("get_current_datetime")]` — return UTC + Unix timestamp
+  - [ ] `[KernelFunction("recall_memory")]` — proxy to `MemoryService.RecallAsync`
+
+#### 9.4 Register Plugins
+
+- [ ] Register `MessagingPlugin`, `SchedulerPlugin`, `UtilityPlugin` in `AgentOrchestrator` via `builder.Plugins.AddFromType<>()`
+- [ ] Ensure plugin DI dependencies (ITelegramChannel, IServiceScopeFactory) are resolvable
+
+#### 9.5 Plugin Tests
+
+- [ ] Test: `MessagingPlugin_SendMessage_CallsTelegram`
+- [ ] Test: `MessagingPlugin_SearchMessages_ReturnsResults`
+- [ ] Test: `SchedulerPlugin_ScheduleTask_PersistsToDb`
+- [ ] Test: `UtilityPlugin_GetCurrentDateTime_ReturnsValidFormat`
+
+---
+
+### Phase 10: Security Filter
+
+#### 10.1 SecurityFilter Implementation
+
+- [ ] Create `src/ClawPilot/AI/Filters/` directory
+- [ ] Create `SecurityFilter.cs` (section 10)
+  - [ ] Implement `IFunctionInvocationFilter`
+  - [ ] Define `BlockedToolPatterns`: `["shell", "bash", "exec", "run_command"]`
+  - [ ] Define `DangerousArgPatterns`: `["rm -rf", "sudo", "chmod 777", "mkfs", "> /dev/"]`
+  - [ ] `OnFunctionInvocationAsync`: check function name against blocked patterns
+  - [ ] `OnFunctionInvocationAsync`: check arguments against dangerous patterns
+  - [ ] Block by setting `context.Result` with error message and returning (skip `next()`)
+  - [ ] Log pre-invocation and post-invocation details
+
+#### 10.2 Register Filter
+
+- [ ] Register `SecurityFilter` as `IFunctionInvocationFilter` in `AgentOrchestrator`'s Kernel builder
+- [ ] Alternatively register in `Program.cs` DI
+
+#### 10.3 Security Tests
+
+- [ ] Test: `SecurityFilter_BlocksDangerousTools` — verify blocked tool names are rejected
+- [ ] Test: `SecurityFilter_BlocksDangerousArgs` — verify dangerous argument patterns are rejected
+- [ ] Test: `SecurityFilter_AllowsSafeTools` — verify normal plugins pass through
+
+---
+
+### Phase 11: Task Scheduler Service
+
+#### 11.1 TaskSchedulerService
+
+- [ ] Create `TaskSchedulerService.cs` in `src/ClawPilot/Services/` (section 3 — Quartz or Timer-based)
+  - [ ] Background service that periodically checks `ScheduledTask` table
+  - [ ] Parse cron expressions to determine if task is due
+  - [ ] Execute due tasks via `AgentOrchestrator` (send prompt to LLM, respond in chat)
+  - [ ] Update `ScheduledTask.LastRunAt` after execution
+  - [ ] Skip inactive tasks (`IsActive = false`)
+
+#### 11.2 Register Service
+
+- [ ] Register `TaskSchedulerService` as hosted service in `Program.cs`
+
+#### 11.3 Scheduler Tests
+
+- [ ] Test: `TaskSchedulerService_ExecutesDueTasks`
+- [ ] Test: `TaskSchedulerService_SkipsInactiveTasks`
+- [ ] Test: `TaskSchedulerService_UpdatesLastRunAt`
+
+---
+
+### Phase 12: Error Handling & Resilience
+
+#### 12.1 LLM Error Surfacing
+
+- [ ] In `MessageProcessorService.ProcessMessageAsync`: catch `HttpRequestException` / SK exceptions from OpenRouter
+- [ ] Format user-facing error: "⚠️ Sorry, something went wrong." (no internal details)
+- [ ] Log full exception with Serilog (including status code, model, conversation ID)
+
+#### 12.2 Telegram Error Handling
+
+- [ ] Handle `ApiRequestException` from Telegram.Bot (rate limits, invalid chat, etc.)
+- [ ] Log and skip messages that can't be sent (chat deleted, bot kicked from group)
+
+#### 12.3 Database Error Handling
+
+- [ ] Handle EF Core `DbUpdateException` — log and surface generic error to user
+- [ ] Ensure database operations don't block the message processing pipeline
+
+#### 12.4 Graceful Degradation
+
+- [ ] If `MemoryService` fails (sqlite-vec not available): log warning, continue without RAG
+- [ ] If vector memory save fails: log warning, don't block response delivery
+- [ ] If session restore fails on startup: log warning, start with empty history
+
+---
+
+### Phase 13: Polish & Production Readiness
+
+#### 13.1 Message Chunking (4096 char limit)
+
+- [ ] Implement smart `ChunkText` in `TelegramChannel` (section 5)
+  - [ ] Split at paragraph boundaries (`\n\n`) when possible
+  - [ ] Split at code block boundaries (`` ``` ``) when possible
+  - [ ] Fallback: split at last newline before limit
+  - [ ] Last resort: hard split at 4096 chars
+- [ ] Send chunks sequentially with small delay to avoid rate limits
+
+#### 13.2 Chat History Cap
+
+- [ ] In `AgentOrchestrator.GetOrCreateHistory`: cap `ChatHistory` at N messages (configurable, default 50)
+- [ ] When over cap: trim oldest non-system messages
+- [ ] Older context handled by sqlite-vec RAG (already wired in Phase 5)
+
+#### 13.3 Graceful Shutdown
+
+- [ ] Register `IHostApplicationLifetime` in relevant services
+- [ ] On shutdown: complete in-flight message processing
+- [ ] On shutdown: flush Serilog sinks
+- [ ] On shutdown: dispose `MemoryService` and `AgentOrchestrator`
+
+#### 13.4 Health Checks
+
+- [ ] Add basic health check endpoint or periodic self-check log
+- [ ] Check: SQLite database is accessible
+- [ ] Check: Telegram bot token is valid (call `getMe`)
+- [ ] Check: OpenRouter API key is valid (test completion with minimal tokens)
+
+#### 13.5 Rate Limiting
+
+- [ ] Telegram API: respect 30 msg/s global limit, 1 msg/s per chat for normal messages
+- [ ] Add per-chat send throttle (e.g., `SemaphoreSlim` or token bucket)
+- [ ] OpenRouter: no explicit rate limiting needed (errors surface to user per Q&A #1)
+
+#### 13.6 Structured Logging Polish
+
+- [ ] Ensure all log messages use structured properties: `{ChatId}`, `{ConversationId}`, `{Function}`, etc.
+- [ ] Add correlation ID to message processing (trace a message through the full pipeline)
+- [ ] Verify log outputs are valid JSON in file sink
+
+---
+
+### Phase 14: Testing
+
+#### 14.1 Unit Tests
+
+- [ ] `DatabaseTests.cs` — entity persistence, constraints, indexes (Phase 2.3)
+- [ ] `TelegramChannelTests.cs` — chunking, filtering (Phase 3.4)
+- [ ] `AgentOrchestratorTests.cs` — history management, reset (Phase 4.3)
+- [ ] `GroupQueueTests.cs` — serialization, parallelism (Phase 8.5)
+- [ ] `SecurityFilterTests.cs` — blocked tools, dangerous args (Phase 10.3)
+- [ ] Plugin tests — messaging, scheduler, utility (Phase 9.5)
+- [ ] Scheduler service tests (Phase 11.3)
+
+#### 14.2 Integration Tests
+
+- [ ] End-to-end: fake Telegram message → DB → SK → DB → fake Telegram send
+- [ ] Memory round-trip: save exchange → recall by semantic query
+- [ ] Session restore: persist messages → restart → verify history rebuilt
+- [ ] Group queue: concurrent messages in same group → verify sequential processing
+
+#### 14.3 Manual Acceptance Tests
+
+- [ ] Send private message to bot → receive AI response
+- [ ] Send message in group → bot responds only when @mentioned or replied to
+- [ ] Send very long prompt → verify response is chunked correctly
+- [ ] Send rapid messages → verify per-chat serialization (no interleaving)
+- [ ] Ask bot to recall past conversation → verify vector memory RAG works
+- [ ] Ask bot to schedule a task → verify `ScheduledTask` row created
+- [ ] Kill and restart bot → verify session resumes with history context
+
+---
+
+### Phase 15: Deployment
+
+#### 15.1 Build & Publish
+
+- [ ] Create publish script: `dotnet publish -c Release -o publish/`
+- [ ] Verify published output runs standalone
+
+#### 15.2 macOS (launchd)
+
+- [ ] Create `com.clawpilot.plist` launchd configuration (section 17)
+- [ ] Set `ProgramArguments` to dotnet + published DLL path
+- [ ] Set `WorkingDirectory`, `RunAtLoad`, `KeepAlive`
+- [ ] Set `EnvironmentVariables` for `DOTNET_ENVIRONMENT=Production`
+- [ ] Configure `StandardOutPath` and `StandardErrorPath` for log files
+- [ ] Test: `launchctl load com.clawpilot.plist` → verify bot starts and stays alive
+
+#### 15.3 Linux (systemd)
+
+- [ ] Create `clawpilot.service` systemd unit file (section 17)
+- [ ] Set `ExecStart`, `WorkingDirectory`, `Restart=always`, `RestartSec=10`
+- [ ] Set `Environment` for secrets (or use env file)
+- [ ] Test: `systemctl start clawpilot` → verify bot starts and stays alive
+
+#### 15.4 Environment & Secrets
+
+- [ ] Document required env vars: `ClawPilot__TelegramBotToken`, `ClawPilot__OpenRouterApiKey`
+- [ ] Document optional env var overrides for all `ClawPilotOptions` properties
+- [ ] Create `.env.example` template file
+
+---
+
+### Phase 16: Skills Engine (Optional — Future)
+
+#### 16.1 Skill Manifest
+
+- [ ] Define skill manifest JSON schema (section 13)
+  - [ ] `name`, `version`, `description`
+  - [ ] `systemPromptAppend` — text to append to base system prompt
+  - [ ] `mcpServers` — map of MCP server configs to import as SK plugins
+  - [ ] `plugins` — reserved for future native SK plugin bundles
+- [ ] Create `skills/` directory in project root for skill files
+
+#### 16.2 Skill Loader
+
+- [ ] Create `SkillLoaderService` — read skill manifests from directory
+- [ ] Append `systemPromptAppend` to `BuildSystemPrompt` for enabled skills
+- [ ] Import `mcpServers` via SK `ImportMcpPluginAsync` (section 9 — MCP integration)
+- [ ] Register skill loader in DI
+
+#### 16.3 Skill Management
+
+- [ ] Implement skill install command (download from URL/git, place in `skills/`)
+- [ ] Implement skill uninstall command (remove from `skills/`)
+- [ ] Implement skill list command (show enabled/disabled skills)
+- [ ] Persist enabled/disabled state in SQLite
+
+#### 16.4 Skill Tests
+
+- [ ] Test: `SkillLoader_LoadsManifest` — parse valid skill JSON
+- [ ] Test: `SkillLoader_AppendsSystemPrompt` — verify prompt injection
+- [ ] Test: `SkillLoader_ImportsMcpServers` — verify MCP plugin registration
 
 ---
 
