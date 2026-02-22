@@ -40,11 +40,7 @@ builder.Services.AddSingleton<MemoryService>();
 
 **Problem**: DI cannot resolve `ClawPilotOptions` directly — only `IOptions<ClawPilotOptions>` is registered. This will throw at startup when the DI container tries to construct `MemoryService`.
 
-**Fix**: Either:
-- (A) Change `MemoryService` constructor to accept `IOptions<ClawPilotOptions>` and unwrap `.Value`, or
-- (B) Register `ClawPilotOptions` directly in DI: `builder.Services.AddSingleton(config);`
-
-Hint: Pick A
+**Fix**: Change `MemoryService` constructor to accept `IOptions<ClawPilotOptions>` and unwrap `.Value`.
 
 ### 1.2 Vector Memory Is Non-Functional (No Embedding Service Registered)
 
@@ -54,21 +50,16 @@ Hint: Pick A
 
 **Result**: All vector memory / RAG capabilities are dead code. The plan's core differentiator (sqlite-vec semantic retrieval) does not function.
 
-**Fix**: Register an `IEmbeddingGenerator` in `Program.cs` that points at OpenRouter's embedding endpoint, e.g.:
+**Fix**: Rewrite `MemoryService` to use the `MemoryBuilder` pattern as the plan specifies (§7), which internally handles embedding generation. This aligns better with SK patterns and provides future extensibility. Remove the `IEmbeddingGenerator` constructor parameter and instead build `ISemanticTextMemory` internally via:
 ```csharp
-builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp =>
-{
-    // Use OpenAI-compatible embedding generation via OpenRouter
-    var client = new OpenAIClient(new ApiKeyCredential(config.OpenRouterApiKey),
-        new OpenAIClientOptions { Endpoint = new Uri("https://openrouter.ai/api/v1") });
-    return client.GetEmbeddingClient(config.EmbeddingModel)
-        .AsEmbeddingGenerator<string, Embedding<float>>();
-});
+var memoryBuilder = new MemoryBuilder();
+memoryBuilder.WithSqliteVecMemoryStore(options.DatabasePath);
+memoryBuilder.WithOpenAITextEmbeddingGeneration(
+    modelId: options.EmbeddingModel,
+    apiKey: options.OpenRouterApiKey,
+    endpoint: "https://openrouter.ai/api/v1");
+_memory = memoryBuilder.Build();
 ```
-
-Alternatively, rewrite `MemoryService` to use the `MemoryBuilder` pattern as the plan specifies (§7), which internally handles embedding generation.
-
-Hint: Pick the `MemoryBuilder` approach for better alignment with SK patterns and future extensibility.
 
 ### 1.3 Database Uses EnsureCreated Instead of Migrations
 
@@ -200,9 +191,7 @@ All NuGet package versions also differ:
 
 **Impact**: Not necessarily wrong (net9.0 is newer), but diverges from plan. May affect the stated "`.NET 8 SDK` installed" prerequisite in §17.
 
-**Fix**: Either update the plan to specify net9.0, or downgrade the project. If keeping net9.0, update documentation.
-
-Hint: use net9.0. Update plan and docs to match the implementation, as net9.0 is the latest and will have longer support.
+**Fix**: Keep net9.0. Update plan and docs to match the implementation — net9.0 is the latest and will have longer support. Update the §17 prerequisite from `.NET 8 SDK` to `.NET 9 SDK`.
 
 ### 3.2 MemoryService Uses Different API Pattern Than Plan
 
@@ -311,9 +300,7 @@ await _bot.SendMessage(
 
 **Impact**: Required for `ReadFrom.Configuration()` — needed but not documented in plan.
 
-**Fix**: Add to plan or note as implicit dependency.
-
-Hint: Add to plan for completeness, as it's required for the Serilog configuration approach used.
+**Fix**: Add `Serilog.Settings.Configuration` to the plan's dependency list — it's required for the `ReadFrom.Configuration()` approach used.
 
 ### 4.2 UtilityPlugin.recall_memory Signature Differs
 
@@ -335,18 +322,14 @@ Takes explicit `conversationId` parameter.
 
 **Impact**: The LLM must know and pass the `conversationId`, which it may not have. The plan's approach (`"global"` scope, `Kernel` injection) is simpler for the LLM to use.
 
-**Fix**: Consider whether per-conversation or global recall is more useful. Update to match plan if global is preferred.
-
-Hint: The global approach is likely more practical for general recall without needing the LLM to track conversation IDs. Update implementation to match plan.
+**Fix**: Update implementation to match plan — use the global approach with `kernel.GetRequiredService<MemoryService>()` and hardcoded `"global"` conversationId. This is more practical since the LLM doesn't need to track conversation IDs.
 
 ### 4.3 MessagingPlugin.search_messages Output Format
 
 **Plan**: Returns JSON via `JsonSerializer.Serialize(messages)`.  
 **Implementation**: Returns formatted strings `[role] sender: content`.
 
-**Fix**: Either approach works; decide on one and update plan/code to match.
-
-Hint: The JSON approach is more structured and easier for the LLM to parse for relevant information. Update implementation to return JSON as per plan.
+**Fix**: Update implementation to return JSON via `JsonSerializer.Serialize(messages)` as per plan. The JSON format is more structured and easier for the LLM to parse for relevant information.
 
 ### 4.4 Plugin Parameter Types: string vs long for chatId
 
@@ -355,8 +338,7 @@ Hint: The JSON approach is more structured and easier for the LLM to parse for r
 
 **Impact**: Using `long` is more type-safe for Telegram chat IDs. Either approach works with SK function calling.
 
-**Fix**: Cosmetic — keep `long` and update plan, or revert to `string` for consistency.
-Hint: Keep `long` for better type safety and update plan accordingly.
+**Fix**: Keep `long` for better type safety. Update plan to specify `long chatId` instead of `string chatId`.
 
 ### 4.5 Deploy Plist Log Paths Differ
 
@@ -465,5 +447,5 @@ The plan explicitly requires these tests that do not exist in the test suite:
 9. **§3.3** — Move MemoryRecord to separate file
 10. **§3.7 + §3.8 + §3.9** — Complete skills engine wiring
 11. **§5** — Add missing tests
-12. **§2.2** — Decide on kernel ownership (plan vs implementation approach)
-13. **§3.1** — Decide net8.0 vs net9.0 and align docs
+12. **§2.2** — Move kernel construction back into AgentOrchestrator per plan
+13. **§3.1** — Update plan and docs to specify net9.0
