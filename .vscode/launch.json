@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "ClawPilot",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/src/ClawPilot/bin/Debug/net9.0/ClawPilot",
+      "args": [],
+      "cwd": "${workspaceFolder}/src/ClawPilot",
+      "console": "integratedTerminal",
+      "stopAtEntry": false,
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    },
+    {
+      "name": "ClawPilot (attach)",
+      "type": "coreclr",
+      "request": "attach"
+    }
+  ]
+}

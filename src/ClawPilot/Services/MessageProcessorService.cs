@@ -137,7 +137,7 @@ public class MessageProcessorService : BackgroundService
             _logger.LogError(httpEx,
                 "LLM request failed for message {MessageId} in chat {ChatId} with status {StatusCode}",
                 message.MessageId, message.ChatId, httpEx.StatusCode);
-            await TrySendErrorAsync(message.ChatId, ct);
+            await TrySendErrorAsync(message.ChatId, httpEx, ct);
         }
         catch (ApiRequestException apiEx)
         {
@@ -150,7 +150,7 @@ public class MessageProcessorService : BackgroundService
             _logger.LogError(dbEx,
                 "Database error processing message {MessageId} for chat {ChatId}",
                 message.MessageId, message.ChatId);
-            await TrySendErrorAsync(message.ChatId, ct);
+            await TrySendErrorAsync(message.ChatId, dbEx, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -159,7 +159,7 @@ public class MessageProcessorService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unexpected error processing message {MessageId} for chat {ChatId}", message.MessageId, message.ChatId);
-            await TrySendErrorAsync(message.ChatId, ct);
+            await TrySendErrorAsync(message.ChatId, ex, ct);
         }
         finally
         {
@@ -197,11 +197,12 @@ public class MessageProcessorService : BackgroundService
         };
     }
 
-    private async Task TrySendErrorAsync(long chatId, CancellationToken ct)
+    private async Task TrySendErrorAsync(long chatId, Exception ex, CancellationToken ct)
     {
         try
         {
             await _telegram.SendTextAsync(chatId, "⚠️ Sorry, something went wrong.", ct: ct);
+            await _telegram.SendTextAsync(chatId, ex.ToString(), ct: ct);
         }
         catch (Exception sendEx)
         {

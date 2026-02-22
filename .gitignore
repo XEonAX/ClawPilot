@@ -416,3 +416,6 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+clawpilot-dev.db
+clawpilot-dev.db-shm
+clawpilot-dev.db-wal
